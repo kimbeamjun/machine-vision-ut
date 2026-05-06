@@ -1,0 +1,33 @@
+# AI 서버 requirements.txt
+# Python 3.12 + conda + RTX 5090 (CUDA 12.x)
+
+# ── PyTorch (conda로 설치 권장) ──────────────────────────────────
+# conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
+
+# ── 딥러닝 / 비전 ────────────────────────────────────────────────
+timm==0.9.16                    # EfficientNet-B2 백본
+opencv-python==4.10.0.84        # 프레임 추출
+mediapipe==0.10.14              # Face Mesh (홍채 좌표)
+scipy==1.13.1                   # calibration interpolate
+matplotlib==3.9.0               # 히트맵 생성
+numpy==1.26.4
+
+# ── 음성 분석 ────────────────────────────────────────────────────
+openai-whisper==20231117        # Whisper medium
+# ffmpeg는 conda 또는 시스템 설치: conda install ffmpeg -c conda-forge
+
+# ── Celery + Redis ───────────────────────────────────────────────
+celery==5.4.0
+redis==5.0.4
+kombu==5.3.4
+
+# ── DB ──────────────────────────────────────────────────────────
+pymysql==1.1.1
+sqlalchemy==2.0.30
+
+# ── MinIO ────────────────────────────────────────────────────────
+minio==7.2.7
+
+# ── 기타 ────────────────────────────────────────────────────────
+python-dotenv==1.0.1
+Pillow==10.3.0
