@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication
 from ui.main_window import MainWindow
 
 def main() -> int:
-    """프로그램의 메인 진입점[cite: 4]"""
+    """프로그램의 메인 진입점"""
     app = QApplication(sys.argv)
     app.setApplicationName("UT Automation Client")
     
