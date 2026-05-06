@@ -8,8 +8,6 @@ __pycache__/
 *.env
 
 # 모델 가중치 (용량 큼)
-models/weights/*.pth
-models/weights/*.bin
 
 # 학습 데이터 (용량 큼)
 dataset/
