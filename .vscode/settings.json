@@ -1,0 +1,9 @@
+{
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}"
+    ],
+    "python.analysis.typeCheckingMode": "basic",
+    "python.analysis.diagnosticMode": "workspace",
+    "python.analysis.reportOptionalMemberAccess": "none",
+    "python-envs.defaultEnvManager": "ms-python.python:venv"
+}
