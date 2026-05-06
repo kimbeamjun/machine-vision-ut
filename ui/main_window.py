@@ -1,7 +1,7 @@
 import sys
 import os
 import time
-from typing import Any, Dict, List, cast
+from typing import Any, Dict, List, cast, Optional
 
 # 폴더 구조 확인 및 루트 경로
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -34,42 +34,44 @@ from .widgets import CalibrationCanvas, RegionPreview, muted, panel, section_lab
 from .overlay import RegionSelector
 from utils.workers import RecordingWorker
 from core.recorder import ScreenRecorder
+from ui.calibration_dialog import CalibrationDialog
+from utils.workers import CalibrationWorker, AnalysisStatusWorker
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         
-        # 레코더 객체 생성
+        # 1. 레코더 객체 생성 (매개변수 없이 기본 호출)
+        # 만약 ScreenRecorder가 인수를 필수로 받는다면, 
+        # 위치 인자로 self.viewport를 전달해야 할 수도 있으나 
+        # 현재 오류 상황을 고려하여 기본 생성자로 복구합니다.
         self.recorder = ScreenRecorder()
         
-        # 녹화 영역 (viewport_region) 초기값 설정
-        # v5 설계에 따라 기본값은 전체화면 비율 혹은 0으로 설정
-        self.viewport = {"x": 0, "y": 0, "w": 1920, "h": 1080} 
-        
-        # 페이지 로그 리스트 초기화
-        self.page_logs = []
-        
-        # 세션 정보 등 필요한 변수
-        self.session_id = None 
+        # 2. 녹화 영역 (viewport) 및 세션 변수 초기화
+        self.viewport = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+        self.session_id: Optional[int] = None 
+        self.page_logs: List[Dict[str, Any]] = []
         self.recording_thread = None
         
-        # 클라이언트 상태 객체 생성 
+        # 3. 설정 및 스레드 풀 객체 생성
         self.state = ClientState()
         self.thread_pool = QThreadPool.globalInstance()
         
-        # API 초기화 (ClientState의 서버 URL 참조)
+        # 4. API 클라이언트 초기화 (self.api로 명칭 통일)
+        # v5 프로토콜 준수: ApiConfig를 통해 ApiClient 생성
         config = ApiConfig(base_url=self.state.server_url)
-        self.api = ApiClient(config)
+        self.api = ApiClient(config) 
         
+        # 5. UI 전체 설정
         self.setWindowTitle("UT Automation Client")
         self.resize(1160, 720)
         self.setStyleSheet(APP_QSS)
 
-        # 화면 전환을 위한 스택 위젯 생성
+        # 6. 화면 전환 레이아웃 (QStackedWidget)
         self.stack = QStackedWidget()
         self.nav_buttons: List[QPushButton] = []
 
-        # 메인 레이아웃 구성
+        # 7. 메인 레이아웃 구성
         root = QWidget()
         root_layout = QVBoxLayout(root)
         root_layout.setContentsMargins(14, 14, 14, 14)
@@ -79,13 +81,14 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.stack)
         self.setCentralWidget(root)
 
-        # 5개 화면 등록
-        self.stack.addWidget(self._build_region_screen())      # Index 0
-        self.stack.addWidget(self._build_calibration_screen()) # Index 1
-        self.stack.addWidget(self._build_test_screen())        # Index 2
-        self.stack.addWidget(self._build_upload_screen())      # Index 3
-        self.stack.addWidget(self._build_report_screen())      # Index 4
+        # 8. 5개 화면 등록 (Index 0~4)
+        self.stack.addWidget(self._build_region_screen())      # Index 0 (영역 설정)
+        self.stack.addWidget(self._build_calibration_screen()) # Index 1 (캘리브레이션)
+        self.stack.addWidget(self._build_test_screen())        # Index 2 (본 테스트)
+        self.stack.addWidget(self._build_upload_screen())      # Index 3 (업로드)
+        self.stack.addWidget(self._build_report_screen())      # Index 4 (결과 리포트)
         
+        # 9. 초기 화면 표시
         self._show_screen(0)
 
     def _build_nav(self) -> QHBoxLayout:
@@ -364,18 +367,79 @@ class MainWindow(QMainWindow):
         self.record_page_entry("https://start.url")
 
     def record_page_entry(self, url):
-        """페이지 진입 시 호출[cite: 7, 9]"""
-        current_ts = self.recorder.get_elapsed_time() # 녹화 시작 기준 절대 초[cite: 9]
+        """페이지 진입 시 로그 기록 """
+        current_ts = self.recorder.get_elapsed_time()
         
-        # 이전 페이지가 있다면 이탈 시각 기록
         if self.page_logs:
+            # 이탈 시각 기록 (절대 타임스탬프)
             self.page_logs[-1]['end_video_ts'] = current_ts
             
-        # 새 페이지 로그 추가
         new_log = {
             "page_no": len(self.page_logs) + 1,
             "url": url,
-            "start_video_ts": current_ts,
-            "screenshot_path": f"screenshots/page_{len(self.page_logs)+1}.png"
+            "start_video_ts": current_ts, # 녹화 0초 기준
+            "end_video_ts": None,
+            "screenshot_path": "" # Presigned URL 업로드 후 경로 저장
         }
         self.page_logs.append(new_log)
+
+    def start_test_process(self):
+        """ [v6] 테스트 시작 흐름 - 타입 캐스팅 강화 버전 """
+        try:
+            if self.session_id is None:
+                payload = self.state.viewport_region.as_payload()
+                session_data = self.api.create_session(viewport_region=payload) 
+                
+                # [수정] 서버에서 온 값이 무엇이든 int로 변환하여 두 곳 모두에 할당
+                raw_id = session_data.get("session_id")
+                if raw_id is not None:
+                    parsed_id = int(raw_id)
+                    self.session_id = parsed_id        # MainWindow (이제 int)[cite: 3]
+                    self.state.session_id = parsed_id  # ClientState (이미 int)
+                else:
+                    raise ValueError("session_id를 찾을 수 없습니다.")
+            
+            # 다이얼로그 호출 부분은 동일
+            self.calib_dialog = CalibrationDialog(self, viewport_region=self.viewport)
+            self.calib_dialog.calibration_finished.connect(self.on_calibration_ui_finished)
+            self.calib_dialog.exec()
+            
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "오류", f"세션 생성 실패: {str(e)}")
+
+    def on_calibration_ui_finished(self, captured_data: list):
+        """ 촬영 완료 후 업로드 및 폴링 시작 """
+        self._show_screen(3) 
+        self.p_bar.setValue(10)
+        
+        # self.api를 통해 캘리브레이션 영상 업로드 수행[cite: 2, 5]
+        self.calib_worker = CalibrationWorker(self.api, captured_data)
+        self.calib_worker.progress.connect(lambda msg: print(f"[캘리브레이션] {msg}"))
+        self.calib_worker.finished.connect(self.on_calibration_upload_done)
+        self.calib_worker.start()
+
+    def on_calibration_upload_done(self, success: bool, message: str):
+        if success:
+            self.p_bar.setValue(50)
+            # 상태 폴링 시작[cite: 2, 5]
+            self.status_worker = AnalysisStatusWorker(self.api)
+            self.status_worker.status_updated.connect(self._update_polling_status)
+            self.status_worker.analysis_finished.connect(self.on_calibration_approved)
+            self.status_worker.start()
+        else:
+            QMessageBox.warning(self, "오류", f"업로드 실패: {message}")
+            self._show_screen(1)
+
+    def _update_polling_status(self, status: str):
+        print(f"AI 서버 분석 상태: {status}")
+        if status == "analyzing":
+            self.p_bar.setValue(75)
+
+    def on_calibration_approved(self, result_data: dict):
+        """ [v6] AI 서버 분석 완료 -> 실제 테스트(화면 녹화) 시작 """
+        self.p_bar.setValue(100)
+        QMessageBox.information(self, "준비 완료", "AI 서버가 시선을 학습했습니다. 테스트를 시작합니다.")
+        self._show_screen(2) # 테스트 화면으로 이동
+        self.start_test() # 실제 녹화 시작 로직 호출
+    
