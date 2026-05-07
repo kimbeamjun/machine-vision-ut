@@ -26,7 +26,6 @@ class PageLog:
 class ClientState:
     """클라이언트의 전체 상태 관리"""
     server_url: str = "http://localhost:8000"
-    # [수정] API 명세서 기준 session_id는 UUID string — int 타입에서 변경
     session_id: Optional[str] = None
     viewport_region: ViewportRegion = field(default_factory=ViewportRegion)
     calibrations: List[Dict[str, Any]] = field(default_factory=list)

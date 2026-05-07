@@ -27,12 +27,6 @@ class RecordingWorker(QThread):
         self.recorder.start(self.region, self.output_path)
 
 
-# utils/workers.py
-import os
-import time
-from typing import Any, Dict
-from PySide6.QtCore import QThread, Signal
-
 class UploadWorker(QThread):
     """
     1. 메타데이터 전송
@@ -51,46 +45,43 @@ class UploadWorker(QThread):
         self.max_retries = max_retries
 
     def run(self):
-            try:
-                # [단계 1] 메타데이터 전송 (10%)
-                self.progress.emit("메타데이터 전송 중...", 10)
-                self.api.send_metadata(
-                    page_logs=self.metadata.get('page_logs', []),
-                    task_results=self.metadata.get('task_results', [])
-                )
+        try:
+            # 메타데이터 전송 (10%)
+            self.progress.emit("메타데이터 전송 중...", 10)
+            self.api.send_metadata(
+                page_logs=self.metadata.get('page_logs', []),
+                task_results=self.metadata.get('task_results', [])
+            )
 
-                # [단계 2 & 3] URL 요청 및 업로드 통합 재시도 루프
-                upload_success = False
-                for attempt in range(1, self.max_retries + 1):
-                    try:
-                        self.progress.emit(f"업로드 준비 중... (시도 {attempt}/{self.max_retries})", 20 + (attempt * 5))
-                        
-                        # 매 시도마다 새로운 URL을 받아오면 더 안전합니다.
-                        url_data = self.api.request_presigned_url(file_type="recording")
-                        presigned_url = url_data.get("presigned_url")
+            # URL 요청 및 업로드 통합 재시도 루프
+            upload_success = False
+            for attempt in range(1, self.max_retries + 1):
+                try:
+                    self.progress.emit(f"업로드 준비 중... (시도 {attempt}/{self.max_retries})", 20 + (attempt * 5))
+                    url_data = self.api.request_presigned_url(file_type="recording")
+                    presigned_url = url_data.get("presigned_url")
 
-                        if presigned_url and self.api.upload_file(presigned_url, self.video_path):
-                            upload_success = True
-                            break
-                    except Exception as e:
-                        print(f"시도 {attempt} 실패: {e}")
-                    
-                    time.sleep(2)
+                    if presigned_url and self.api.upload_file(presigned_url, self.video_path):
+                        upload_success = True
+                        break
+                except Exception as e:
+                    print(f"시도 {attempt} 실패: {e}")
 
-                if not upload_success:
-                    self.finished.emit(False, f"영상 업로드에 {self.max_retries}회 실패했습니다. 네트워크 상태를 확인하세요.")
-                    return
+                time.sleep(2)
 
-                # [단계 4] 분석 시작 트리거 (90%)
-                self.progress.emit("AI 분석 작업 요청 중...", 90)
-                self.api.start_analysis()
-                
-                self.progress.emit("모든 데이터 전송 완료!", 100)
-                self.finished.emit(True, "성공")
+            if not upload_success:
+                self.finished.emit(False, f"영상 업로드에 {self.max_retries}회 실패했습니다. 네트워크 상태를 확인하세요.")
+                return
 
-            except Exception as e:
-                # 예상치 못한 시스템 오류 처리
-                self.finished.emit(False, f"시스템 오류 발생: {str(e)}")
+            # 분석 시작 트리거 (90%)
+            self.progress.emit("AI 분석 작업 요청 중...", 90)
+            self.api.start_analysis()
+
+            self.progress.emit("모든 데이터 전송 완료!", 100)
+            self.finished.emit(True, "성공")
+
+        except Exception as e:
+            self.finished.emit(False, f"시스템 오류 발생: {str(e)}")
 
 
 class CalibrationWorker(QThread):
@@ -130,8 +121,7 @@ class CalibrationWorker(QThread):
                     self.finished.emit(False, f"캘리브레이션 {pt['point_no']}번 영상 업로드 실패")
                     return
 
-            # 5개 포인트 등록 API 호출 (명세서 B 항목)
-            # [FIX] 업로드 실패 시 이미 return하므로 길이 체크는 불필요한 데드코드 — 제거
+            # 5개 포인트 등록 API 호출
             self.api.register_calibration(uploaded_points)
             self.finished.emit(True, "캘리브레이션 등록 완료")
 

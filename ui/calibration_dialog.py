@@ -9,22 +9,26 @@ class CalibrationDialog(QDialog):
     """5개 포인트 촬영 및 로컬 저장 담당"""
     calibration_finished = Signal(list)
 
-    def __init__(self, parent=None, viewport_region=None):
+    # 기본 5점 레이아웃 — AI 실패 시 failed_points 필터링으로 재촬영
+    _DEFAULT_POINTS = [
+        {"point_no": 1, "x": 0.1, "y": 0.1},
+        {"point_no": 2, "x": 0.9, "y": 0.1},
+        {"point_no": 3, "x": 0.5, "y": 0.5},
+        {"point_no": 4, "x": 0.1, "y": 0.9},
+        {"point_no": 5, "x": 0.9, "y": 0.9},
+    ]
+
+    def __init__(self, parent=None, viewport_region=None, points_to_capture=None):
         super().__init__(parent)
-        # [NOTE] viewport_region은 현재 미사용 — 캘리브레이션 포인트는 전체 화면 기준 고정 비율로 정의됨.
-        # 뷰포트 내 상대 좌표가 필요하면 self.points 정의 시 viewport_region을 반영해야 함.
+        # viewport_region은 현재 미사용 — 캘리브레이션 포인트는 전체 화면 기준 고정 비율로 정의됨
+        # 뷰포트 내 상대 좌표가 필요하면 self.points 정의 시 viewport_region을 반영해야 함
         self.viewport_region = viewport_region
+
+        # [CL-REQ-32] points_to_capture 가 주어지면 해당 포인트만 촬영, None 이면 전체 5점을 촬영
+        self.points = points_to_capture if points_to_capture else list(self._DEFAULT_POINTS)
+
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.showFullScreen()
-
-        # 1. 5개 포인트 정의
-        self.points = [
-            {"point_no": 1, "x": 0.1, "y": 0.1},
-            {"point_no": 2, "x": 0.9, "y": 0.1},
-            {"point_no": 3, "x": 0.5, "y": 0.5},
-            {"point_no": 4, "x": 0.1, "y": 0.9},
-            {"point_no": 5, "x": 0.9, "y": 0.9},
-        ]
 
         self.current_index = 0
         self.captured_data = []
@@ -67,7 +71,7 @@ class CalibrationDialog(QDialog):
             # 녹화 시작 (640x480, 20fps)
             self.out = cv2.VideoWriter(save_path, self.fourcc, 20.0, (640, 480))
 
-            # CalibrationWorker가 기대하는 키 이름으로 통일: x / y (screen_x/screen_y 제거)
+            # CalibrationWorker가 기대하는 키 이름으로 통일
             self.captured_data.append({
                 "point_no": point['point_no'],
                 "x": point['x'],   # 비율 좌표 — CalibrationWorker에서 screen_x로 변환
