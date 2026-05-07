@@ -10,12 +10,17 @@ ROOT_DIR = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from PySide6.QtCore import Qt, QThreadPool, Slot, QTimer
+from PySide6.QtCore import Qt, QThreadPool, Slot, QTimer, QUrl
 from PySide6.QtWidgets import (
     QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QProgressBar, QSizePolicy,
     QStackedWidget, QVBoxLayout, QWidget, QApplication, QMessageBox
 )
+
+try:
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+except ImportError:
+    QWebEngineView = None
 
 try:
     from models.models import ClientState, PageLog
@@ -52,6 +57,7 @@ class MainWindow(QMainWindow):
         self.analysis_status_worker = None
         self.is_uploading = False
         self.video_output_path = os.path.abspath("test_video.mp4")
+        self.test_running = False
 
         # 3. 설정 및 스레드 풀 객체 생성
         self.state = ClientState()
@@ -411,12 +417,33 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(body)
         main = QWidget()
         main_layout = QVBoxLayout(main)
-        main_layout.addWidget(QLineEdit("https://demo-test.com"))
 
-        browser_area = QFrame()
-        browser_area.setStyleSheet("background:#1e2433; border: 2px dashed #30363d; border-radius:8px;")
-        browser_area.setMinimumHeight(350)
-        main_layout.addWidget(browser_area)
+        url_bar = QHBoxLayout()
+        self.test_url_input = QLineEdit("https://example.com")
+        self.test_url_input.returnPressed.connect(self._load_test_url)
+        btn_go = QPushButton("이동")
+        btn_go.clicked.connect(self._load_test_url)
+        url_bar.addWidget(self.test_url_input)
+        url_bar.addWidget(btn_go)
+        main_layout.addLayout(url_bar)
+
+        if QWebEngineView is not None:
+            self.web_view = QWebEngineView()
+            self.web_view.setMinimumHeight(350)
+            self.web_view.urlChanged.connect(self._on_browser_url_changed)
+            main_layout.addWidget(self.web_view)
+        else:
+            self.web_view = None
+            browser_area = QFrame()
+            browser_area.setStyleSheet("background:#1e2433; border: 2px dashed #30363d; border-radius:8px;")
+            browser_area.setMinimumHeight(350)
+            browser_layout = QVBoxLayout(browser_area)
+            browser_layout.addWidget(
+                QLabel("PySide6-WebEngine을 사용할 수 없어 내장 브라우저를 표시하지 못했습니다."),
+                0,
+                Qt.AlignmentFlag.AlignCenter,
+            )
+            main_layout.addWidget(browser_area)
 
         task_panel = QFrame()
         task_panel.setFixedWidth(250)
@@ -437,13 +464,19 @@ class MainWindow(QMainWindow):
 
     def start_test(self) -> None:
         """테스트 시작: 화면 녹화 시작 + 첫 페이지 로그 기록"""
+        self.page_logs.clear()
+        self.state.task_results.clear()
+        self.test_running = True
         self.video_output_path = os.path.abspath("test_video.mp4")
         self.recording_thread = RecordingWorker(self.recorder, self.viewport, self.video_output_path)
         self.recording_thread.start()
-        self.record_page_entry("https://start.url")
+        self._load_test_url()
 
     def record_page_entry(self, url: str) -> None:
         """페이지 진입 시 로그 기록 (절대 타임스탬프 기준)"""
+        if self.page_logs and self.page_logs[-1]["url"] == url and self.page_logs[-1]["end_video_ts"] is None:
+            return
+
         current_ts = self.recorder.get_elapsed_time()
 
         if self.page_logs:
@@ -457,6 +490,29 @@ class MainWindow(QMainWindow):
             "screenshot_path": "",
         }
         self.page_logs.append(new_log)
+
+    def _load_test_url(self) -> None:
+        raw_url = self.test_url_input.text().strip()
+        if not raw_url:
+            return
+
+        if "://" not in raw_url:
+            raw_url = f"https://{raw_url}"
+            self.test_url_input.setText(raw_url)
+
+        if self.web_view is not None:
+            self.web_view.setUrl(QUrl(raw_url))
+        elif self.test_running:
+            self.record_page_entry(raw_url)
+
+    def _on_browser_url_changed(self, url: QUrl) -> None:
+        url_text = url.toString()
+        if not url_text:
+            return
+
+        self.test_url_input.setText(url_text)
+        if self.test_running:
+            self.record_page_entry(url_text)
 
     # ──────────────────────────────────────────────
     # 화면 3: 업로드/분석 대기
@@ -479,6 +535,7 @@ class MainWindow(QMainWindow):
         if self.recording_thread and self.recording_thread.isRunning():
             self.recorder.stop()
             self.recording_thread.wait(5000)
+        self.test_running = False
 
         final_ts = self.recorder.get_elapsed_time()
         if self.page_logs:
