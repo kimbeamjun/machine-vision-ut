@@ -11,6 +11,8 @@ class CalibrationDialog(QDialog):
 
     def __init__(self, parent=None, viewport_region=None):
         super().__init__(parent)
+        # [NOTE] viewport_region은 현재 미사용 — 캘리브레이션 포인트는 전체 화면 기준 고정 비율로 정의됨.
+        # 뷰포트 내 상대 좌표가 필요하면 self.points 정의 시 viewport_region을 반영해야 함.
         self.viewport_region = viewport_region
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.showFullScreen()
@@ -112,4 +114,3 @@ class CalibrationDialog(QDialog):
             self.cap.release()
         self.calibration_finished.emit(self.captured_data)
         self.close()
-        

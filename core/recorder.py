@@ -48,14 +48,19 @@ class ScreenRecorder(QObject):
             self.writer = cv2.VideoWriter(output_path, fourcc, fps, (pixel_w, pixel_h))
 
             while self.is_recording:
+                # [FIX] 프레임 시작 시각을 기록해 캡처/인코딩 소요 시간을 제거하고 대기
+                frame_start = time.perf_counter()
                 img = sct.grab(monitor)
                 frame = np.array(img)
                 # BGRA → BGR 변환 (OpenCV 기본 포맷)
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
                 self.writer.write(frame)
 
-                # FPS 유지를 위한 대기 시간 계산
-                time.sleep(1 / fps)
+                # 처리에 걸린 시간만큼 sleep을 줄여 실제 FPS를 목표에 근접시킴
+                elapsed = time.perf_counter() - frame_start
+                sleep_time = (1.0 / fps) - elapsed
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
 
         # 자원 해제
         if self.writer:

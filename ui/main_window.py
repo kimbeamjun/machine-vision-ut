@@ -156,7 +156,10 @@ class MainWindow(QMainWindow):
         side_layout.setSpacing(8)
         side_layout.addWidget(section_label("서버 설정"))
         side_layout.addWidget(QLabel("Server URL"))
-        side_layout.addWidget(QLineEdit(self.state.server_url))
+        # [FIX] editingFinished 시그널로 state.server_url 및 ApiClient 갱신
+        self.server_url_input = QLineEdit(self.state.server_url)
+        self.server_url_input.editingFinished.connect(self._on_server_url_changed)
+        side_layout.addWidget(self.server_url_input)
         side_layout.addSpacing(12)
         side_layout.addWidget(section_label("녹화 범위"))
 
@@ -233,6 +236,18 @@ class MainWindow(QMainWindow):
         self.viewport = self.state.viewport_region.as_payload()
         self.region_preview.update()
         self._update_region_grid()
+        # [FIX] 사이드바 좌표 텍스트를 갱신된 비율로 업데이트
+        vr = self.state.viewport_region
+        self.coord_label.setText(
+            f"x:{vr.x:.2f} y:{vr.y:.2f} | w:{vr.w:.2f} h:{vr.h:.2f}"
+        )
+
+    def _on_server_url_changed(self) -> None:
+        """[FIX] 사용자가 Server URL을 수정하면 state와 ApiClient를 즉시 갱신합니다."""
+        new_url = self.server_url_input.text().strip()
+        if new_url and new_url != self.state.server_url:
+            self.state.server_url = new_url
+            self.api = ApiClient(ApiConfig(base_url=new_url))
 
     def _handle_create_session(self) -> None:
         """
@@ -301,13 +316,26 @@ class MainWindow(QMainWindow):
     def _start_calibration_dialog(self) -> None:
         """
         세션 확인 후 CalibrationDialog(웹캠 촬영)를 실행합니다.
-        기존 start_test_process()에서 session_id를 재생성하던 로직을 제거하고
-        _handle_create_session()에서 이미 생성된 session_id를 그대로 사용합니다.
+        재시도 시나리오(AI 분석 실패 후 Screen 1 복귀)를 고려하여,
+        이전 폴링 워커가 살아있으면 먼저 종료합니다.
         """
         if self.state.session_id is None:
             QMessageBox.warning(self, "세션 없음", "먼저 '녹화 범위 설정' 화면에서 세션을 생성해주세요.")
             self._show_screen(0)
             return
+
+        # [FIX] 재시도: 이전 CalibrationStatusWorker가 아직 살아있으면 종료
+        if hasattr(self, "calib_status_worker") and self.calib_status_worker is not None:
+            if self.calib_status_worker.isRunning():
+                self.calib_status_worker.stop()
+                self.calib_status_worker.wait(2000)
+            self.calib_status_worker = None
+
+        # [FIX] 재시도: 이전 CalibrationWorker도 방어적으로 종료
+        if hasattr(self, "calib_worker") and self.calib_worker is not None:
+            if self.calib_worker.isRunning():
+                self.calib_worker.wait(2000)
+            self.calib_worker = None
 
         # 캔버스 UI 애니메이션 시작
         self.calib_canvas.start_calibration()
@@ -557,6 +585,15 @@ class MainWindow(QMainWindow):
             self.recording_thread.wait(3000)
         if self.upload_worker and self.upload_worker.isRunning():
             self.upload_worker.terminate()
+        # [FIX] 캘리브레이션 업로드 워커 정리
+        if hasattr(self, "calib_worker") and self.calib_worker is not None:
+            if self.calib_worker.isRunning():
+                self.calib_worker.wait(2000)
+        # [FIX] 캘리브레이션 폴링 워커 정리
+        if hasattr(self, "calib_status_worker") and self.calib_status_worker is not None:
+            if self.calib_status_worker.isRunning():
+                self.calib_status_worker.stop()
+                self.calib_status_worker.wait(2000)
         if self.analysis_status_worker and self.analysis_status_worker.isRunning():
             self.analysis_status_worker.stop()
             self.analysis_status_worker.wait(1000)

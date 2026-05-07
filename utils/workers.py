@@ -119,10 +119,7 @@ class CalibrationWorker(QThread):
                     return
 
             # 5개 포인트 등록 API 호출 (명세서 B 항목)
-            if len(uploaded_points) != len(self.points_to_upload):
-                self.finished.emit(False, "일부 캘리브레이션 영상이 업로드되지 않았습니다.")
-                return
-
+            # [FIX] 업로드 실패 시 이미 return하므로 길이 체크는 불필요한 데드코드 — 제거
             self.api.register_calibration(uploaded_points)
             self.finished.emit(True, "캘리브레이션 등록 완료")
 
