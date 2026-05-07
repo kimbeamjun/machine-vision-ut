@@ -30,7 +30,7 @@ CELERY_BROKER   = f"redis://{REDIS_HOST}:{REDIS_PORT_A}/0"
 CELERY_BACKEND  = f"redis://{REDIS_HOST}:{REDIS_PORT_A}/1"
 
 # ── 모델 경로 ────────────────────────────────────────────────────
-MODEL_DIR           = os.getenv("MODEL_DIR", "/home/llm-server/Desktop/beomjun/models/weights")
+MODEL_DIR           = os.getenv("MODEL_DIR", "/home/llm-server/Desktop/beomjun/machine-vision-ut/models/weights")
 EMOTION_MODEL_PATH  = os.path.join(MODEL_DIR, "emotion_model.pth")
 
 # ── 분석 하이퍼파라미터 ──────────────────────────────────────────
