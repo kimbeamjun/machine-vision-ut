@@ -25,7 +25,7 @@ class ScreenRecorder(QObject):
         fourcc = cv2.VideoWriter.fourcc(*'mp4v')
 
         with mss() as sct:
-            # [수정] 비율 좌표 → 실제 픽셀 좌표 변환
+            # 비율 좌표 → 실제 픽셀 좌표 변환
             # monitors[1]: 주 모니터 (monitors[0]은 모든 모니터의 합산 영역)
             primary = sct.monitors[1]
             sw = primary['width']

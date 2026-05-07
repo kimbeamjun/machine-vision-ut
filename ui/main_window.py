@@ -31,7 +31,7 @@ from .overlay import RegionSelector
 from core.recorder import ScreenRecorder
 from ui.calibration_dialog import CalibrationDialog
 from utils.workers import (
-    RecordingWorker, CalibrationWorker,
+    RecordingWorker, UploadWorker, CalibrationWorker,
     CalibrationStatusWorker, AnalysisStatusWorker,
 )
 
@@ -45,10 +45,13 @@ class MainWindow(QMainWindow):
 
         # 2. 녹화 영역 및 세션 변수 초기화
         self.viewport = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
-        # [수정] session_id는 UUID string — int에서 변경
         self.session_id: Optional[str] = None
         self.page_logs: List[Dict[str, Any]] = []
         self.recording_thread = None
+        self.upload_worker = None
+        self.analysis_status_worker = None
+        self.is_uploading = False
+        self.video_output_path = os.path.abspath("test_video.mp4")
 
         # 3. 설정 및 스레드 풀 객체 생성
         self.state = ClientState()
@@ -127,7 +130,7 @@ class MainWindow(QMainWindow):
         title_layout.addWidget(QLabel(badge))
         title_layout.addStretch()
 
-        # [수정] session_id가 str이므로 str() 변환 그대로 유지 (int 변환 불필요)
+        # session_id가 str이므로 str() 변환 그대로 유지
         sid = self.state.session_id if self.state.session_id is not None else "-"
         title_layout.addWidget(muted(f"session_id: {sid}"))
 
@@ -233,9 +236,8 @@ class MainWindow(QMainWindow):
 
     def _handle_create_session(self) -> None:
         """
-        [수정] 실제 API를 호출하여 세션을 생성합니다.
-        기존: int(time.time())으로 가짜 ID 생성 → API 미호출
-        수정: create_session() 호출 → UUID string session_id 저장
+        실제 API를 호출하여 세션을 생성합니다.
+        create_session() 호출 → UUID string session_id 저장
         """
         try:
             payload = self.state.viewport_region.as_payload()
@@ -245,7 +247,7 @@ class MainWindow(QMainWindow):
             if raw_id is None:
                 raise ValueError("서버 응답에 session_id가 없습니다.")
 
-            # [수정] session_id는 UUID string — int 변환 제거
+            # session_id는 UUID string
             self.session_id = str(raw_id)
             self.state.session_id = self.session_id
 
@@ -280,9 +282,7 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.calib_canvas)
 
         actions = QHBoxLayout()
-        # [수정] "데이터 수집 시작" 버튼을 _start_calibration_dialog에 연결
-        #   기존: calib_canvas.start_calibration() (캔버스 애니메이션만, CalibrationDialog 미실행)
-        #   수정: 실제 웹캠 다이얼로그 + 캔버스 애니메이션 동시 실행
+        # "데이터 수집 시작" 버튼을 _start_calibration_dialog에 연결
         btn_start = QPushButton("데이터 수집 시작")
         btn_start.clicked.connect(self._start_calibration_dialog)
         self.btn_next_test = QPushButton("테스트 단계 이동")
@@ -300,7 +300,7 @@ class MainWindow(QMainWindow):
 
     def _start_calibration_dialog(self) -> None:
         """
-        [수정] 세션 확인 후 CalibrationDialog(웹캠 촬영)를 실행합니다.
+        세션 확인 후 CalibrationDialog(웹캠 촬영)를 실행합니다.
         기존 start_test_process()에서 session_id를 재생성하던 로직을 제거하고
         _handle_create_session()에서 이미 생성된 session_id를 그대로 사용합니다.
         """
@@ -340,8 +340,6 @@ class MainWindow(QMainWindow):
         """업로드 완료 후 캘리브레이션 AI 분석 상태 폴링 시작"""
         if success:
             self.p_bar.setValue(50)
-            # [수정] CalibrationStatusWorker 사용 (GET /calibrate/status)
-            #   기존: AnalysisStatusWorker → GET /report (리포트 폴링 전용 — 잘못된 연결)
             self.calib_status_worker = CalibrationStatusWorker(self.api)
             self.calib_status_worker.status_updated.connect(self._update_calibration_status)
             self.calib_status_worker.calibration_done.connect(self.on_calibration_approved)
@@ -353,8 +351,7 @@ class MainWindow(QMainWindow):
 
     def _update_calibration_status(self, status: str) -> None:
         """
-        [수정] CalibrationStatusWorker가 순수 status 문자열을 emit하므로 직접 비교
-        기존: status == "analyzing" 비교가 "현재 상태: analyzing" 형식 문자열과 불일치
+        CalibrationStatusWorker가 순수 status 문자열을 emit하므로 직접 비교하여 진행 상태 업데이트
         """
         print(f"[캘리브레이션] AI 분석 상태: {status}")
         if status == "analyzing":
@@ -412,7 +409,8 @@ class MainWindow(QMainWindow):
 
     def start_test(self) -> None:
         """테스트 시작: 화면 녹화 시작 + 첫 페이지 로그 기록"""
-        self.recording_thread = RecordingWorker(self.recorder, self.viewport, "test_video.mp4")
+        self.video_output_path = os.path.abspath("test_video.mp4")
+        self.recording_thread = RecordingWorker(self.recorder, self.viewport, self.video_output_path)
         self.recording_thread.start()
         self.record_page_entry("https://start.url")
 
@@ -450,21 +448,59 @@ class MainWindow(QMainWindow):
 
     def _handle_test_finished(self) -> None:
         """테스트 종료 후 녹화 중지 및 업로드 시작"""
-        # 녹화 중지
         if self.recording_thread and self.recording_thread.isRunning():
             self.recorder.stop()
+            self.recording_thread.wait(5000)
+
+        final_ts = self.recorder.get_elapsed_time()
+        if self.page_logs:
+            self.page_logs[-1]["end_video_ts"] = final_ts
+
+        if not self.state.task_results:
+            self.state.task_results.append(
+                {
+                    "task_order": 1,
+                    "result": "completed",
+                    "duration_sec": final_ts,
+                }
+            )
 
         self._show_screen(3)
         self.p_bar.setValue(25)
-        QTimer.singleShot(1500, lambda: self._on_upload_finished(True, ""))
+
+        metadata = {
+            "page_logs": self.page_logs,
+            "task_results": self.state.task_results,
+        }
+        self.is_uploading = True
+        self.upload_worker = UploadWorker(self.api, self.video_output_path, metadata)
+        self.upload_worker.progress.connect(lambda msg: print(f"[업로드] {msg}"))
+        self.upload_worker.finished.connect(self._on_upload_finished)
+        self.upload_worker.start()
 
     def _on_upload_finished(self, success: bool, msg: str) -> None:
         """업로드 결과에 따른 화면 전환"""
+        self.is_uploading = False
         if success:
-            self.p_bar.setValue(100)
-            self._show_screen(4)
+            self.p_bar.setValue(80)
+            self.analysis_status_worker = AnalysisStatusWorker(self.api)
+            self.analysis_status_worker.status_updated.connect(self._on_analysis_status_updated)
+            self.analysis_status_worker.analysis_finished.connect(self._on_analysis_finished)
+            self.analysis_status_worker.start()
         else:
             QMessageBox.critical(self, "오류", f"업로드 실패: {msg}")
+
+    def _on_analysis_status_updated(self, status: str) -> None:
+        if status == "generating":
+            self.p_bar.setValue(90)
+        elif status == "failed":
+            QMessageBox.critical(self, "분석 실패", "서버 분석 또는 보고서 생성에 실패했습니다.")
+            self._show_screen(4)
+
+    def _on_analysis_finished(self, result: Dict[str, Any]) -> None:
+        self.p_bar.setValue(100)
+        self.report_result = result
+        self._show_screen(4)
 
     # ──────────────────────────────────────────────
     # 화면 4: 보고서
@@ -478,6 +514,51 @@ class MainWindow(QMainWindow):
         btn = QPushButton("보고서(PDF) 내려받기")
         btn.setObjectName("SuccessButton")
         btn.setFixedSize(220, 50)
+        btn.clicked.connect(self._handle_report_download)
         layout.addWidget(btn, 0, Qt.AlignmentFlag.AlignCenter)
         layout.addStretch()
         return self._app_frame(body, "done")
+
+    def _handle_report_download(self) -> None:
+        result = getattr(self, "report_result", None) or self.api.get_report_status()
+        pdf_bytes = result.get("pdf_bytes") if isinstance(result, dict) else None
+        if pdf_bytes:
+            reports_dir = os.path.abspath("reports")
+            os.makedirs(reports_dir, exist_ok=True)
+            session_part = self.state.session_id or "latest"
+            pdf_path = os.path.join(reports_dir, f"report_{session_part}.pdf")
+            with open(pdf_path, "wb") as file:
+                file.write(pdf_bytes)
+            QMessageBox.information(self, "보고서 저장 완료", f"PDF 저장 경로:\n{pdf_path}")
+            return
+
+        pdf_url = result.get("pdf_url") or result.get("pdf_presigned_url") or result.get("download_url")
+        if pdf_url:
+            QMessageBox.information(self, "보고서 준비 완료", f"보고서 URL:\n{pdf_url}")
+            return
+
+        QMessageBox.information(self, "보고서 상태", f"현재 상태: {result.get('status', 'unknown')}")
+
+    def closeEvent(self, event) -> None:
+        if self.is_uploading:
+            answer = QMessageBox.warning(
+                self,
+                "업로드 진행 중",
+                "영상 업로드가 진행 중입니다. 지금 종료하면 테스트 데이터가 누락될 수 있습니다.",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer == QMessageBox.StandardButton.Cancel:
+                event.ignore()
+                return
+
+        if self.recording_thread and self.recording_thread.isRunning():
+            self.recorder.stop()
+            self.recording_thread.wait(3000)
+        if self.upload_worker and self.upload_worker.isRunning():
+            self.upload_worker.terminate()
+        if self.analysis_status_worker and self.analysis_status_worker.isRunning():
+            self.analysis_status_worker.stop()
+            self.analysis_status_worker.wait(1000)
+
+        event.accept()

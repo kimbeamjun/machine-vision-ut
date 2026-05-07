@@ -43,14 +43,18 @@ class UploadWorker(QThread):
 
     def run(self):
         try:
-            # 1. 메타데이터 전송 (명세서 D 항목)
+            if not os.path.exists(self.video_path):
+                self.finished.emit(False, f"녹화 파일을 찾을 수 없습니다: {self.video_path}")
+                return
+
+            # 1. 메타데이터 전송
             self.progress.emit("메타데이터 전송 중...")
             self.api.send_metadata(
                 page_logs=self.metadata['page_logs'],
                 task_results=self.metadata['task_results'],
             )
 
-            # 2. 영상 업로드를 위한 Presigned URL 요청 (명세서 1단계, file_type='recording')
+            # 2. 영상 업로드를 위한 Presigned URL 요청
             self.progress.emit("영상 업로드 준비 중...")
             url_data = self.api.request_presigned_url(file_type="recording")
 
@@ -61,13 +65,15 @@ class UploadWorker(QThread):
                 self.finished.emit(False, "서버로부터 유효한 업로드 경로를 받지 못했습니다.")
                 return
 
-            # 3. 실제 영상 파일 업로드 (명세서 3단계)
-            #    완료 시 MinIO가 웹훅으로 분석을 자동 트리거 (명세서 4단계)
+            # 3. 실제 영상 파일 업로드
+            #    완료 후 /analyze를 호출해 서버 분석 큐에 등록
             self.progress.emit("영상 파일 업로드 중...")
             success = self.api.upload_file(presigned_url, self.video_path)
 
             if success:
-                self.finished.emit(True, "영상 업로드 완료 — 서버에서 분석을 시작합니다.")
+                self.progress.emit("분석 작업 등록 중...")
+                self.api.start_analysis()
+                self.finished.emit(True, "영상 업로드 완료 및 분석 등록 완료")
             else:
                 self.finished.emit(False, "영상 업로드에 실패했습니다.")
 
@@ -90,6 +96,10 @@ class CalibrationWorker(QThread):
         try:
             uploaded_points = []
             for pt in self.points_to_upload:
+                if not os.path.exists(pt["path"]):
+                    self.finished.emit(False, f"캘리브레이션 파일을 찾을 수 없습니다: {pt['path']}")
+                    return
+
                 self.progress.emit(f"포인트 {pt['point_no']} 영상 업로드 중...")
 
                 # file_type='calibration', point_no 전달 (명세서 1단계)
@@ -104,8 +114,15 @@ class CalibrationWorker(QThread):
                         "screen_y": pt['y'],
                         "video_object_key": url_res['object_key'],
                     })
+                else:
+                    self.finished.emit(False, f"캘리브레이션 {pt['point_no']}번 영상 업로드 실패")
+                    return
 
             # 5개 포인트 등록 API 호출 (명세서 B 항목)
+            if len(uploaded_points) != len(self.points_to_upload):
+                self.finished.emit(False, "일부 캘리브레이션 영상이 업로드되지 않았습니다.")
+                return
+
             self.api.register_calibration(uploaded_points)
             self.finished.emit(True, "캘리브레이션 등록 완료")
 
@@ -115,8 +132,7 @@ class CalibrationWorker(QThread):
 
 class CalibrationStatusWorker(QThread):
     """
-    [추가] 캘리브레이션 AI 분석 완료 여부를 주기적으로 폴링하는 일꾼.
-    (명세서 C 항목: GET /api/v1/sessions/{id}/calibrate/status)
+    캘리브레이션 AI 분석 완료 여부를 주기적으로 폴링하는 일꾼.
 
     캘리브레이션 완료(status=done) → 본 녹화 시작 가능.
     실패(status=failed) → failed_points 참조하여 해당 포인트만 재촬영 유도.
@@ -158,7 +174,6 @@ class CalibrationStatusWorker(QThread):
 class AnalysisStatusWorker(QThread):
     """
     본녹화 분석 완료 후 리포트(PDF) 생성 상태를 주기적으로 폴링하는 일꾼.
-    (명세서 12~13단계: GET /api/v1/sessions/{id}/report)
 
     CalibrationStatusWorker와 혼용 금지 — 각각 별도 엔드포인트 사용.
     """

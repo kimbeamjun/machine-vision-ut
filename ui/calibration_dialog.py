@@ -65,7 +65,7 @@ class CalibrationDialog(QDialog):
             # 녹화 시작 (640x480, 20fps)
             self.out = cv2.VideoWriter(save_path, self.fourcc, 20.0, (640, 480))
 
-            # [수정] CalibrationWorker가 기대하는 키 이름으로 통일: x / y (screen_x/screen_y 제거)
+            # CalibrationWorker가 기대하는 키 이름으로 통일: x / y (screen_x/screen_y 제거)
             self.captured_data.append({
                 "point_no": point['point_no'],
                 "x": point['x'],   # 비율 좌표 — CalibrationWorker에서 screen_x로 변환
