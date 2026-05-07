@@ -214,7 +214,7 @@ def run_gaze_analysis(
             scr_bytes = None
 
         heatmap_bytes = _generate_heatmap(gaze_points, pno, scr_bytes)
-        obj_key       = f"heatmaps/session_{session_id}/page_{pno}_heatmap.png"
+        obj_key       = f"sessions/session_{session_id}/heatmap.png"
         upload_image(obj_key, heatmap_bytes)
         heatmap_paths[pno] = obj_key
 
@@ -230,7 +230,7 @@ def run_gaze_analysis(
             gaze_escape_ratio_per_page[pno] = 0.0
 
     # ── MinIO JSON 저장 ──────────────────────────────────────────
-    detail_key = f"raw/session_{session_id}/gaze_details.json"
+    detail_key = f"sessions/session_{session_id}/detail.json"
     payload    = json.dumps(gaze_points, ensure_ascii=False).encode("utf-8")
     upload_json(detail_key, payload)
 

@@ -82,7 +82,7 @@ def analyze_calibration(self, session_id: int, calibration_points: list[dict]):
                 "point_no": 1,
                 "screen_x": 0.1,
                 "screen_y": 0.1,
-                "video_object_key": "calibrations/session_1/point_1.mp4"
+                "video_object_key": "sessions/session_1/calibration_1.mp4"
             }, ...
         ]
     """

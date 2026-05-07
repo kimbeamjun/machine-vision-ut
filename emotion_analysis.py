@@ -110,7 +110,7 @@ def run_emotion_analysis(video_local_path: str, session_id: int) -> dict:
     cap.release()
 
     # ── MinIO JSON 저장 ─────────────────────────────────────────
-    object_key = f"raw/session_{session_id}/emotion_details.json"
+    object_key = f"sessions/session_{session_id}/detail.json"
     payload    = json.dumps(frame_emotions, ensure_ascii=False).encode("utf-8")
     upload_json(object_key, payload)
 

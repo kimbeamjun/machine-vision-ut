@@ -19,7 +19,18 @@ def get_minio_client() -> Minio:
 
 
 def download_video(object_key: str, local_path: str) -> str:
-    """MinIO에서 영상 파일을 local_path에 다운로드"""
+    """MinIO에서 본녹화 영상을 local_path에 다운로드
+    object_key 예시: sessions/session_1/recording.mp4
+    """
+    client = get_minio_client()
+    client.fget_object(MINIO_BUCKET, object_key, local_path)
+    return local_path
+
+
+def download_calibration_video(object_key: str, local_path: str) -> str:
+    """MinIO에서 캘리브레이션 영상을 local_path에 다운로드
+    object_key 예시: sessions/session_1/calibration_1.mp4
+    """
     client = get_minio_client()
     client.fget_object(MINIO_BUCKET, object_key, local_path)
     return local_path
