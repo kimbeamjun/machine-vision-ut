@@ -10,9 +10,10 @@ import requests
 class ApiConfig:
     """HTTP API connection settings."""
 
-    base_url: str = "http://127.0.0.1:8000"
+    base_url: str = "http://10.10.10.113:8001"
     timeout_sec: float = 30.0
 
+    minio_url: str = "http://10.10.10.113:9000"
 
 class ApiClient:
     def __init__(self, config: ApiConfig) -> None:
@@ -170,3 +171,18 @@ class ApiClient:
 
     def _url(self, path: str) -> str:
         return f"{self.config.base_url.rstrip('/')}/{path.lstrip('/')}"
+    
+    def abort_session(self) -> Dict[str, Any]:
+        """
+        서버에 현재 세션 중단을 알리고, 업로드된 임시 파일 등의 리소스 삭제를 요청합니다.
+        """
+        if self.session_id is None:
+            return {}
+
+        try:
+            # 서버 명세에 따라 엔드포인트를 조정하세요. 
+            # 예: /api/v1/sessions/{id}/abort 또는 DELETE /api/v1/sessions/{id}
+            return self._post(f"/api/v1/sessions/{self.session_id}/abort", {})
+        except Exception as e:
+            print(f"세션 중단 요청 중 오류 발생: {e}")
+            return {"error": str(e)}

@@ -27,58 +27,70 @@ class RecordingWorker(QThread):
         self.recorder.start(self.region, self.output_path)
 
 
+# utils/workers.py
+import os
+import time
+from typing import Any, Dict
+from PySide6.QtCore import QThread, Signal
+
 class UploadWorker(QThread):
     """
-    메타데이터 전송 및 최종 영상을 업로드하는 일꾼.
-    분석 트리거는 MinIO 업로드 완료 시 서버 웹훅이 자동 처리합니다. (명세서 4단계)
+    1. 메타데이터 전송
+    2. Presigned URL 요청
+    3. MinIO 업로드 (재시도 포함)
+    4. 분석 트리거
     """
     finished = Signal(bool, str)  # (성공여부, 메시지)
-    progress = Signal(str)        # 현재 진행 상태 메시지
+    progress = Signal(str, int)   # (메시지, 퍼센트)
 
-    def __init__(self, api_client: ApiClient, video_path: str, metadata: Dict[str, Any]):
+    def __init__(self, api_client, video_path: str, metadata: Dict[str, Any], max_retries: int = 3):
         super().__init__()
         self.api = api_client
         self.video_path = video_path
         self.metadata = metadata
+        self.max_retries = max_retries
 
     def run(self):
-        try:
-            if not os.path.exists(self.video_path):
-                self.finished.emit(False, f"녹화 파일을 찾을 수 없습니다: {self.video_path}")
-                return
+            try:
+                # [단계 1] 메타데이터 전송 (10%)
+                self.progress.emit("메타데이터 전송 중...", 10)
+                self.api.send_metadata(
+                    page_logs=self.metadata.get('page_logs', []),
+                    task_results=self.metadata.get('task_results', [])
+                )
 
-            # 1. 메타데이터 전송
-            self.progress.emit("메타데이터 전송 중...")
-            self.api.send_metadata(
-                page_logs=self.metadata['page_logs'],
-                task_results=self.metadata['task_results'],
-            )
+                # [단계 2 & 3] URL 요청 및 업로드 통합 재시도 루프
+                upload_success = False
+                for attempt in range(1, self.max_retries + 1):
+                    try:
+                        self.progress.emit(f"업로드 준비 중... (시도 {attempt}/{self.max_retries})", 20 + (attempt * 5))
+                        
+                        # 매 시도마다 새로운 URL을 받아오면 더 안전합니다.
+                        url_data = self.api.request_presigned_url(file_type="recording")
+                        presigned_url = url_data.get("presigned_url")
 
-            # 2. 영상 업로드를 위한 Presigned URL 요청
-            self.progress.emit("영상 업로드 준비 중...")
-            url_data = self.api.request_presigned_url(file_type="recording")
+                        if presigned_url and self.api.upload_file(presigned_url, self.video_path):
+                            upload_success = True
+                            break
+                    except Exception as e:
+                        print(f"시도 {attempt} 실패: {e}")
+                    
+                    time.sleep(2)
 
-            presigned_url = url_data.get("presigned_url")
-            object_key = url_data.get("object_key")
+                if not upload_success:
+                    self.finished.emit(False, f"영상 업로드에 {self.max_retries}회 실패했습니다. 네트워크 상태를 확인하세요.")
+                    return
 
-            if not presigned_url or not isinstance(object_key, str):
-                self.finished.emit(False, "서버로부터 유효한 업로드 경로를 받지 못했습니다.")
-                return
-
-            # 3. 실제 영상 파일 업로드
-            #    완료 후 /analyze를 호출해 서버 분석 큐에 등록
-            self.progress.emit("영상 파일 업로드 중...")
-            success = self.api.upload_file(presigned_url, self.video_path)
-
-            if success:
-                self.progress.emit("분석 작업 등록 중...")
+                # [단계 4] 분석 시작 트리거 (90%)
+                self.progress.emit("AI 분석 작업 요청 중...", 90)
                 self.api.start_analysis()
-                self.finished.emit(True, "영상 업로드 완료 및 분석 등록 완료")
-            else:
-                self.finished.emit(False, "영상 업로드에 실패했습니다.")
+                
+                self.progress.emit("모든 데이터 전송 완료!", 100)
+                self.finished.emit(True, "성공")
 
-        except Exception as e:
-            self.finished.emit(False, f"오류 발생: {str(e)}")
+            except Exception as e:
+                # 예상치 못한 시스템 오류 처리
+                self.finished.emit(False, f"시스템 오류 발생: {str(e)}")
 
 
 class CalibrationWorker(QThread):
@@ -204,3 +216,39 @@ class AnalysisStatusWorker(QThread):
 
     def stop(self):
         self.is_running = False
+        
+class ScreenshotUploadWorker(QThread):
+    """
+    페이지 이동 시 스크린샷을 캡처하여 서버에 업로드하고 경로를 반환하는 일꾼
+    """
+    finished = Signal(bool, str, str)  # (성공여부, 스크린샷_경로/메시지, 로그_ID)
+
+    def __init__(self, api_client, image_data: bytes, log_id: str):
+        super().__init__()
+        self.api = api_client
+        self.image_data = image_data # 메모리에 있는 이미지 바이트 데이터
+        self.log_id = log_id
+
+    def run(self):
+        try:
+            # 1. Presigned URL 요청
+            url_data = self.api.request_presigned_url(file_type="screenshot")
+            presigned_url = url_data.get("presigned_url")
+            object_key = url_data.get("object_key") # 서버에서 생성된 저장 경로
+
+            if not presigned_url or not object_key:
+                self.finished.emit(False, "URL 요청 실패", self.log_id)
+                return
+
+            # 2. 업로드 (파일 저장 없이 바이너리로 바로 전송)
+            # ApiClient의 upload_file을 조금 수정하거나 requests.put을 직접 사용
+            import requests
+            response = requests.put(presigned_url, data=self.image_data, timeout=10)
+            
+            if response.status_code in (200, 201, 204):
+                self.finished.emit(True, object_key, self.log_id)
+            else:
+                self.finished.emit(False, "업로드 실패", self.log_id)
+
+        except Exception as e:
+            self.finished.emit(False, str(e), self.log_id)

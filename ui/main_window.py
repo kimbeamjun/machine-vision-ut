@@ -10,12 +10,17 @@ ROOT_DIR = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from PySide6.QtCore import Qt, QThreadPool, Slot, QTimer, QUrl
+from PySide6.QtMultimedia import QCamera, QMediaCaptureSession, QImageCapture
+from PySide6.QtMultimediaWidgets import QVideoWidget    
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtCore import Qt, QThreadPool, Slot, QTimer, QUrl, QByteArray, QBuffer, QIODevice
 from PySide6.QtWidgets import (
     QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QProgressBar, QSizePolicy,
-    QStackedWidget, QVBoxLayout, QWidget, QApplication, QMessageBox
+    QStackedWidget, QVBoxLayout, QWidget, QApplication,
+    QMessageBox, QGroupBox
 )
+
 
 try:
     from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -37,7 +42,7 @@ from core.recorder import ScreenRecorder
 from ui.calibration_dialog import CalibrationDialog
 from utils.workers import (
     RecordingWorker, UploadWorker, CalibrationWorker,
-    CalibrationStatusWorker, AnalysisStatusWorker,
+    CalibrationStatusWorker, AnalysisStatusWorker, ScreenshotUploadWorker
 )
 
 
@@ -58,19 +63,24 @@ class MainWindow(QMainWindow):
         self.is_uploading = False
         self.video_output_path = os.path.abspath("test_video.mp4")
         self.test_running = False
+        self.task_results = []   # 태스크 수행 결과 (dict 형태 등)
 
         # 3. 설정 및 스레드 풀 객체 생성
         self.state = ClientState()
         self.thread_pool = QThreadPool.globalInstance()
 
         # 4. API 클라이언트 초기화
-        config = ApiConfig(base_url=self.state.server_url)
+        config = ApiConfig(base_url="http://10.10.10.113:8001")
         self.api = ApiClient(config)
 
         # 5. UI 전체 설정
         self.setWindowTitle("UT Automation Client")
         self.resize(1160, 720)
         self.setStyleSheet(APP_QSS)
+        
+        self.upload_status_label = QLabel("데이터 업로드 준비 중...", self)
+        self.upload_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
 
         # 6. 화면 전환 레이아웃
         self.stack = QStackedWidget()
@@ -410,57 +420,126 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────
     # 화면 2: 테스트 진행
     # ──────────────────────────────────────────────
-
+    
     def _build_test_screen(self) -> QWidget:
-        """[화면 2] 시선 추적 테스트 진행 화면"""
-        body = QWidget()
-        layout = QHBoxLayout(body)
-        main = QWidget()
-        main_layout = QVBoxLayout(main)
+            """[화면 2] 시선 추적 테스트 진행 화면 (카메라 및 태스크 제어 포함)"""
+            body = QWidget()
+            layout = QHBoxLayout(body)
+            main = QWidget()
+            main_layout = QVBoxLayout(main)
 
-        url_bar = QHBoxLayout()
-        self.test_url_input = QLineEdit("https://example.com")
-        self.test_url_input.returnPressed.connect(self._load_test_url)
-        btn_go = QPushButton("이동")
-        btn_go.clicked.connect(self._load_test_url)
-        url_bar.addWidget(self.test_url_input)
-        url_bar.addWidget(btn_go)
-        main_layout.addLayout(url_bar)
+            # --- (중략: 상단 URL 바 및 브라우저 영역은 기존과 동일) ---
+            url_bar = QHBoxLayout()
+            self.test_url_input = QLineEdit("https://example.com")
+            self.test_url_input.returnPressed.connect(self._load_test_url)
+            btn_go = QPushButton("이동")
+            btn_go.clicked.connect(self._load_test_url)
+            url_bar.addWidget(self.test_url_input)
+            url_bar.addWidget(btn_go)
+            main_layout.addLayout(url_bar)
 
-        if QWebEngineView is not None:
-            self.web_view = QWebEngineView()
-            self.web_view.setMinimumHeight(350)
-            self.web_view.urlChanged.connect(self._on_browser_url_changed)
-            main_layout.addWidget(self.web_view)
-        else:
-            self.web_view = None
-            browser_area = QFrame()
-            browser_area.setStyleSheet("background:#1e2433; border: 2px dashed #30363d; border-radius:8px;")
-            browser_area.setMinimumHeight(350)
-            browser_layout = QVBoxLayout(browser_area)
-            browser_layout.addWidget(
-                QLabel("PySide6-WebEngine을 사용할 수 없어 내장 브라우저를 표시하지 못했습니다."),
-                0,
-                Qt.AlignmentFlag.AlignCenter,
-            )
-            main_layout.addWidget(browser_area)
+            if QWebEngineView is not None:
+                self.web_view = QWebEngineView()
+                self.web_view.setMinimumHeight(350)
+                self.web_view.urlChanged.connect(self._on_browser_url_changed)
+                main_layout.addWidget(self.web_view)
+            # ------------------------------------------------------
 
-        task_panel = QFrame()
-        task_panel.setFixedWidth(250)
-        task_layout = QVBoxLayout(task_panel)
-        task_layout.addWidget(section_label("현재 태스크"))
-        for t in ["메인 로고 클릭", "검색바 입력", "상세 페이지 이동"]:
-            task_layout.addWidget(QLabel(f"- {t}"))
-        task_layout.addStretch()
+            # 3. 우측 패널 (카메라 미리보기 + 태스크 제어)
+            task_panel = QFrame()
+            task_panel.setFixedWidth(280)
+            task_panel.setStyleSheet("background: #21262d; border-radius: 8px;")
+            
+            # [해결 포인트] task_layout을 먼저 정의합니다.
+            self.task_layout = QVBoxLayout(task_panel)
+            
+            # 4. 웹캠 미리보기 섹션 추가
+            self.task_layout.addWidget(section_label("👤 사용자 캠"))
+            
+            # 카메라 설정을 호출하여 self.viewfinder를 생성합니다.
+            self._setup_camera() 
+            
+            # 생성된 viewfinder를 레이아웃에 추가합니다.
+            if hasattr(self, 'viewfinder'):
+                self.task_layout.addWidget(self.viewfinder)
+            
+            self.task_layout.addSpacing(10)
+            self.task_layout.addWidget(section_label("📋 테스트 시나리오"))
 
-        btn_finish = QPushButton("테스트 종료 및 데이터 전송")
-        btn_finish.setObjectName("PrimaryButton")
-        btn_finish.clicked.connect(self._handle_test_finished)
-        main_layout.addWidget(btn_finish)
+            # --- 태스크 버튼 생성 로직 (기존과 동일) ---
+            self.tasks = ["메인 로고 클릭", "검색바 입력", "상세 페이지 이동"]
+            for i, t_name in enumerate(self.tasks, 1):
+                t_group = QGroupBox(f"Task {i}")
+                t_group_layout = QVBoxLayout(t_group)
+                label = QLabel(t_name)
+                
+                btn_start = QPushButton("시작")
+                btn_success = QPushButton("성공")
+                btn_success.setVisible(False)
+                btn_fail = QPushButton("실패")
+                btn_fail.setVisible(False)
 
-        layout.addWidget(main)
-        layout.addWidget(task_panel)
-        return self._app_frame(body, "recording")
+                # 시그널 연결
+                btn_start.clicked.connect(lambda chk, n=t_name, o=i, s=btn_start, ok=btn_success, no=btn_fail: 
+                                        self._ui_start_task(n, o, s, ok, no))
+                btn_success.clicked.connect(lambda chk, ok=btn_success, no=btn_fail: self._ui_finish_task(True, ok, no))
+                btn_fail.clicked.connect(lambda chk, ok=btn_success, no=btn_fail: self._ui_finish_task(False, ok, no))
+
+                t_group_layout.addWidget(label)
+                t_group_layout.addWidget(btn_start)
+                t_group_layout.addWidget(btn_success)
+                t_group_layout.addWidget(btn_fail)
+                self.task_layout.addWidget(t_group)
+
+            self.task_layout.addStretch()
+
+            # 하단 종료 버튼
+            btn_finish = QPushButton("테스트 종료 및 데이터 전송")
+            btn_finish.setObjectName("PrimaryButton")
+            btn_finish.clicked.connect(self._handle_test_finished)
+            main_layout.addWidget(btn_finish)
+
+            layout.addWidget(main)
+            layout.addWidget(task_panel)
+            return self._app_frame(body, "recording")
+
+    def _setup_camera(self):
+        """웹캠 초기화 및 캡처 세션 설정"""
+        try:
+            # 카메라 객체 생성
+            self.camera = QCamera()
+            self.capture_session = QMediaCaptureSession()
+            self.capture_session.setCamera(self.camera)
+            
+            # 비디오 출력 위젯 설정
+            self.viewfinder = QVideoWidget()
+            self.viewfinder.setFixedSize(260, 180) # 패널 너비에 맞춰 조정
+            self.viewfinder.setStyleSheet("border: 1px solid #30363d; background: black; border-radius: 4px;")
+            
+            self.capture_session.setVideoOutput(self.viewfinder)
+            
+            # 카메라 시작
+            self.camera.start()
+        except Exception as e:
+            print(f"⚠️ 카메라 설정을 완료할 수 없습니다: {e}")
+
+    # --- 태스크 제어용 헬퍼 함수 ---
+
+    def _ui_start_task(self, name, order, btn_s, btn_ok, btn_no):
+        """UI에서 시작 버튼 클릭 시 호출"""
+        self._start_task(name, order) # 이전에 만든 데이터 기록 함수 호출
+        btn_s.setEnabled(False)      # 시작 버튼 비활성화
+        btn_s.setText("진행 중...")
+        btn_ok.setVisible(True)      # 성공 버튼 표시
+        btn_no.setVisible(True)      # 실패 버튼 표시
+
+    def _ui_finish_task(self, is_success, btn_ok, btn_no):
+        """UI에서 성공/실패 버튼 클릭 시 호출"""
+        self._finish_task(is_success) # 이전에 만든 데이터 기록 함수 호출
+        btn_ok.setEnabled(False)     # 결과 확정 후 비활성화
+        btn_no.setEnabled(False)
+        status_text = "✅ 성공" if is_success else "❌ 실패"
+        btn_ok.getParent().setTitle(f"Task 완료 ({status_text})")
 
     def start_test(self) -> None:
         """테스트 시작: 화면 녹화 시작 + 첫 페이지 로그 기록"""
@@ -519,61 +598,140 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────
 
     def _build_upload_screen(self) -> QWidget:
-        """[화면 3] 데이터 전송 및 분석 대기 화면"""
-        body = QWidget()
-        layout = QVBoxLayout(body)
-        layout.addStretch()
-        layout.addWidget(QLabel("AI 서버 분석 중... 잠시만 기다려 주세요."), 0, Qt.AlignmentFlag.AlignCenter)
-        self.p_bar = QProgressBar()
-        self.p_bar.setFixedWidth(400)
-        layout.addWidget(self.p_bar, 0, Qt.AlignmentFlag.AlignCenter)
-        layout.addStretch()
-        return self._app_frame(body, "upload")
+            """[화면 3] 데이터 전송 및 분석 대기 화면"""
+            body = QWidget()
+            layout = QVBoxLayout(body)
+            layout.addStretch()
+
+            # 상태 라벨
+            self.upload_status_label.setStyleSheet("font-size: 16px; font-weight: bold;")
+            layout.addWidget(self.upload_status_label, 0, Qt.AlignmentFlag.AlignCenter)
+
+            # 프로그레스 바 설정
+            self.p_bar = QProgressBar()
+            self.p_bar.setFixedWidth(400)
+            self.p_bar.setRange(0, 100)  # 0%에서 100%까지 표시
+            self.p_bar.setValue(0)       # 처음엔 0으로 시작
+            layout.addWidget(self.p_bar, 0, Qt.AlignmentFlag.AlignCenter)
+            
+            layout.addStretch()
+            return self._app_frame(body, "upload")
 
     def _handle_test_finished(self) -> None:
-        """테스트 종료 후 녹화 중지 및 업로드 시작"""
-        if self.recording_thread and self.recording_thread.isRunning():
-            self.recorder.stop()
-            self.recording_thread.wait(5000)
-        self.test_running = False
+            """
+            테스트 종료 처리: 마지막 로그 기록 -> 녹화 중지 -> 데이터 업로드 시작
+            """
+            # 1. 마지막 페이지 로그 종료 시간 기록 (중요!)
+            if hasattr(self, 'page_logs') and self.page_logs:
+                # 현재 녹화된 시점을 마지막 로그의 종료 시각으로 설정
+                current_ts = time.time() - self.recorder.start_time
+                self.page_logs[-1]['end_video_ts'] = round(current_ts, 2)
 
-        final_ts = self.recorder.get_elapsed_time()
-        if self.page_logs:
-            self.page_logs[-1]["end_video_ts"] = final_ts
+            # 2. 녹화 중지
+            if self.recorder.is_recording:
+                self.recorder.stop()
+                if self.recording_thread and self.recording_thread.isRunning():
+                    self.recording_thread.wait()
+            
+            self.test_running = False
+            
+            # 3. 화면 전환 (Index 3: 업로드 대기 화면)
+            self._show_screen(3)
+            self.is_uploading = True
+            self.upload_status_label.setText("데이터를 정리하여 서버로 전송 중입니다...")
 
-        if not self.state.task_results:
-            self.state.task_results.append(
-                {
-                    "task_order": 1,
-                    "result": "completed",
-                    "duration_sec": final_ts,
-                }
+            # 4. 업로드 워커 실행 (metadata 선전송 -> 영상 후전송 구조)
+            metadata = {
+                "page_logs": self.page_logs,
+                "task_results": self.task_results
+            }
+
+            from utils.workers import UploadWorker
+            self.upload_worker = UploadWorker(
+                api_client=self.api,
+                video_path=self.video_output_path,
+                metadata=metadata
             )
 
-        self._show_screen(3)
-        self.p_bar.setValue(25)
+            # 시그널 연결 (기존에 정의한 _on_upload_progress, _on_upload_finished 사용)
+            self.upload_worker.progress.connect(self._on_upload_progress)
+            self.upload_worker.finished.connect(self._on_upload_finished)
+            self.upload_worker.start()
 
-        metadata = {
-            "page_logs": self.page_logs,
-            "task_results": self.state.task_results,
-        }
-        self.is_uploading = True
-        self.upload_worker = UploadWorker(self.api, self.video_output_path, metadata)
-        self.upload_worker.progress.connect(lambda msg: print(f"[업로드] {msg}"))
-        self.upload_worker.finished.connect(self._on_upload_finished)
-        self.upload_worker.start()
+    def _on_upload_progress(self, message: str, value: Optional[int] = None) -> None:
+            """
+            업로드 진행 상황 업데이트
+            :param message: 표시할 텍스트 메시지
+            :param value: 프로그레스 바에 표시할 정수 값 (0~100)
+            """
+            self.upload_status_label.setText(message)
+            
+            # value 값이 들어오면 프로그레스 바를 업데이트합니다.
+            if value is not None:
+                self.p_bar.setValue(value)
 
-    def _on_upload_finished(self, success: bool, msg: str) -> None:
-        """업로드 결과에 따른 화면 전환"""
-        self.is_uploading = False
+    @Slot(bool, str)
+    def _on_upload_finished(self, success: bool, message: str) -> None:
+        """
+        업로드 워커 종료 시 호출되는 슬롯
+        :param success: 업로드 성공 여부
+        :param message: 실패 사유 또는 성공 메시지
+        """
         if success:
-            self.p_bar.setValue(80)
-            self.analysis_status_worker = AnalysisStatusWorker(self.api)
-            self.analysis_status_worker.status_updated.connect(self._on_analysis_status_updated)
-            self.analysis_status_worker.analysis_finished.connect(self._on_analysis_finished)
-            self.analysis_status_worker.start()
+            # 성공 시: 분석 폴링 시작
+            self.upload_status_label.setText("✅ 업로드 성공! 분석을 시작합니다.")
+            self._start_analysis_polling()
         else:
-            QMessageBox.critical(self, "오류", f"업로드 실패: {msg}")
+            # 실패 시: 상태 리셋 및 UI 복구
+            self.is_uploading = False  # 상태 플래그 해제
+            self.p_bar.setValue(0)      # 프로그레스 바 초기화
+            
+            # [수정] QMessageBox 설정 시 정확한 Enum 경로 사용
+            msg_box = QMessageBox(self)
+            # QMessageBox.Critical -> QMessageBox.Icon.Critical
+            msg_box.setIcon(QMessageBox.Icon.Critical) 
+            msg_box.setWindowTitle("업로드 실패")
+            msg_box.setText(f"데이터 전송에 실패했습니다.\n사유: {message}")
+            
+            # QMessageBox.ActionRole -> QMessageBox.ButtonRole.ActionRole
+            retry_btn = msg_box.addButton("다시 시도", QMessageBox.ButtonRole.ActionRole)
+            # QMessageBox.RejectRole -> QMessageBox.ButtonRole.RejectRole
+            cancel_btn = msg_box.addButton("테스트 화면으로 돌아가기", QMessageBox.ButtonRole.RejectRole)
+            
+            msg_box.exec()
+            
+            if msg_box.clickedButton() == retry_btn:
+                # 다시 시도: 핸들러 재호출 (처음부터 다시 시퀀스 시작)
+                self._handle_test_finished()
+            else:
+                # 복구: 테스트 화면(Index 2)으로 되돌리기
+                self.test_running = True # 다시 테스트 가능 상태로 설정
+                self._show_screen(2)
+
+    def _start_analysis_polling(self) -> None:
+        """분석 상태 감시 시작"""
+        from utils.workers import AnalysisStatusWorker
+        
+        # 기존 워커가 있다면 정리
+        if self.analysis_status_worker and self.analysis_status_worker.isRunning():
+            self.analysis_status_worker.stop()
+            self.analysis_status_worker.wait()
+
+        self.analysis_status_worker = AnalysisStatusWorker(self.api)
+        self.analysis_status_worker.status_updated.connect(
+            lambda s: self.upload_status_label.setText(f"🧐 AI 분석 중: {s}...")
+        )
+        self.analysis_status_worker.analysis_finished.connect(self._on_analysis_complete)
+        self.analysis_status_worker.start()
+
+    def _on_analysis_complete(self, data: dict) -> None:
+        """분석이 성공적으로 완료되었을 때 호출"""
+        self.is_uploading = False
+        self.upload_status_label.setText("🎉 분석이 완료되었습니다!")
+        
+        # 요구사항에 따라 Index 4(리포트 화면)로 자동 전환하거나 버튼 활성화
+        self._show_screen(4)
+        QMessageBox.information(self, "분석 완료", "최종 리포트가 생성되었습니다.")
 
     def _on_analysis_status_updated(self, status: str) -> None:
         if status == "generating":
@@ -586,7 +744,122 @@ class MainWindow(QMainWindow):
         self.p_bar.setValue(100)
         self.report_result = result
         self._show_screen(4)
+        
+    def _start_task(self, task_name: str, task_order: int) -> None:
+        """
+        태스크 시작 시 호출: 시작 시간 기록 및 현재 활성 태스크 설정
+        """
+        self.current_task_info = {
+            "task_name": task_name,
+            "task_order": task_order,
+            "start_time": time.time()  # duration 계산을 위한 실제 시간
+        }
+        print(f"🚀 태스크 시작: {task_name} (순서: {task_order})")
 
+    def _finish_task(self, is_success: bool) -> None:
+        """
+        태스크 종료 시 호출: 결과 판단, 소요 시간(duration) 계산 및 저장
+        """
+        if not hasattr(self, 'current_task_info') or self.current_task_info is None:
+            print("⚠️ 진행 중인 태스크가 없습니다.")
+            return
+
+        # 1. 소요 시간 계산
+        duration = round(time.time() - self.current_task_info["start_time"], 2)
+        
+        # 2. 결과 데이터 구성 (설계서 핵심 데이터)
+        task_entry = {
+            "task_order": self.current_task_info["task_order"],
+            "task_name": self.current_task_info["task_name"],
+            "result": "success" if is_success else "fail",
+            "duration_sec": duration,
+            "timestamp": time.time()
+        }
+
+        # 3. 메인 저장소에 추가
+        self.task_results.append(task_entry)
+        
+        # 4. 현재 태스크 초기화
+        self.current_task_info = None
+        print(f"🏁 태스크 종료: {task_entry['result']} (소요시간: {duration}초)")
+    
+    def add_task_result(self, task_id: int, success: bool, duration: float):
+        """태스크 결과를 수집하여 리스트에 추가"""
+        result = {
+            "task_id": task_id,
+            "success": success,
+            "completion_time": duration,
+            "timestamp": time.time()
+        }
+        self.task_results.append(result)
+
+    def _capture_and_upload_screenshot(self, log_entry: dict) -> None:
+            """
+            현재 화면 전체를 캡처하여 디스크 저장 없이 메모리상에서 즉시 서버로 업로드하는 시퀀스를 시작합니다.
+            
+            :param log_entry: 화면 이동 로그 기록을 담고 있는 딕셔너리 객체 (업로드 완료 후 경로 업데이트용)
+            """
+            # 1. 현재 운영체제에서 사용 중인 메인 스크린 객체를 획득합니다.
+            screen = QGuiApplication.primaryScreen()
+            if not screen:
+                print("⚠️ 활성화된 스크린을 찾을 수 없어 캡처를 중단합니다.")
+                return
+
+            # 2. 메인 스크린의 전체 화면을 QPixmap 형태로 캡처(Grab)합니다.
+            pixmap = screen.grabWindow(0)
+            
+            # 3. 디스크에 임시 PNG 파일을 쓰지 않기 위해 PySide6의 메모리 버퍼 시스템을 활용합니다.
+            byte_array = QByteArray()                # 바이너리 데이터를 담을 바이트 배열 생성
+            buffer = QBuffer(byte_array)             # 바이트 배열을 버퍼 장치에 연결
+            buffer.open(QIODevice.OpenModeFlag.WriteOnly) # 쓰기 전용 모드로 버퍼를 오픈
+            pixmap.save(buffer, "PNG")               # 캡처한 이미지를 PNG 포맷의 바이너리로 버퍼에 기록
+            image_bytes = byte_array.data()          # 최종적으로 Python에서 사용할 수 있는 bytes 형태로 변환
+
+            # 4. 고유한 작업을 식별하기 위해 현재까지 기록된 페이지 로그의 길이를 임시 ID로 설정합니다.
+            log_id = str(len(self.page_logs))
+
+            # 5. UI 메인 스레드가 멈추지 않도록 비동기 스레드인 ScreenshotUploadWorker를 생성합니다.
+            worker = ScreenshotUploadWorker(self.api, image_bytes, log_id)
+            
+            # 6. 파이썬의 가비지 컬렉터(GC)에 의해 워커 객체가 도중에 소멸되는 것을 방지하기 위해 리스트에 참조를 유지합니다.
+            if not hasattr(self, 'screenshot_workers'):
+                self.screenshot_workers = []
+            self.screenshot_workers.append(worker)
+
+            # 7. 워커의 작업 완료 시그널과 결과 처리 슬롯(함수)을 연결합니다.
+            # 람다 식을 활용하여 현재 어떤 로그 엔트리를 업데이트해야 하는지 참조를 함께 전달합니다.
+            worker.finished.connect(
+                lambda success, path, lid: self._on_screenshot_upload_finished(
+                    worker, success, path, lid, log_entry
+                )
+            )
+            
+            # 8. 백그라운드 스레드 작업을 시작합니다.
+            worker.start()
+
+    @Slot(bool, str, str)
+    def _on_screenshot_upload_finished(self, worker: ScreenshotUploadWorker, success: bool, result: str, log_id: str, log_entry: dict) -> None:
+        """
+        스크린샷 업로드 스레드가 작업을 끝마쳤을 때 호출되는 결과 처리 슬롯입니다.
+        
+        :param worker: 작업을 수행한 ScreenshotUploadWorker 객체 (리스트에서 제거하기 위함)
+        :param success: 업로드 성공 여부 (True/False)
+        :param result: 성공 시 MinIO의 객체 경로(object_key), 실패 시 에러 메시지
+        :param log_id: 작업을 요청할 때 부여했던 임시 로그 식별 ID
+        :param log_entry: 경로를 채워 넣어야 하는 대상 페이지 로그 딕셔너리
+        """
+        if success:
+            # 업로드 성공 시: 비어있던 screenshot_path 키에 서버가 반환해준 저장 경로를 채웁니다.
+            log_entry["screenshot_path"] = result
+            print(f"📸 [스크린샷] 서버 업로드 성공 및 경로 저장 완료: {result}")
+        else:
+            # 업로드 실패 시: 로그 기록을 보존하되 에러 내용을 콘솔에 출력합니다.
+            print(f"❌ [스크린샷] 업로드 실패 사유: {result} (로그 ID: {log_id})")
+        
+        # 사용이 완료된 워커 객체는 메모리 누수 방지를 위해 관리 리스트에서 제거합니다.
+        if hasattr(self, 'screenshot_workers') and worker in self.screenshot_workers:
+            self.screenshot_workers.remove(worker)
+            
     # ──────────────────────────────────────────────
     # 화면 4: 보고서
     # ──────────────────────────────────────────────
@@ -625,34 +898,50 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "보고서 상태", f"현재 상태: {result.get('status', 'unknown')}")
 
     def closeEvent(self, event) -> None:
-        if self.is_uploading:
-            answer = QMessageBox.warning(
-                self,
-                "업로드 진행 중",
-                "영상 업로드가 진행 중입니다. 지금 종료하면 테스트 데이터가 누락될 수 있습니다.",
-                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Cancel,
-            )
-            if answer == QMessageBox.StandardButton.Cancel:
-                event.ignore()
-                return
+            """앱 종료 시 데이터 유실 방지를 위한 리소스 정리 및 경고"""
+            
+            # 1. 업로드 중일 때 경고 (v6 요구사항 반영)
+            if self.is_uploading:
+                answer = QMessageBox.warning(
+                    self,
+                    "작업 진행 중",
+                    "데이터 업로드 또는 AI 분석이 진행 중입니다.\n지금 종료하면 결과 리포트를 확인할 수 없습니다. 정말 종료하시겠습니까?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer == QMessageBox.StandardButton.No:
+                    event.ignore()
+                    return
+                
+                # 사용자가 종료를 선택한 경우 서버에 즉시 삭제 요청
+                self.api.abort_session()
 
-        if self.recording_thread and self.recording_thread.isRunning():
-            self.recorder.stop()
-            self.recording_thread.wait(3000)
-        if self.upload_worker and self.upload_worker.isRunning():
-            self.upload_worker.terminate()
-        # [FIX] 캘리브레이션 업로드 워커 정리
-        if hasattr(self, "calib_worker") and self.calib_worker is not None:
-            if self.calib_worker.isRunning():
-                self.calib_worker.wait(2000)
-        # [FIX] 캘리브레이션 폴링 워커 정리
-        if hasattr(self, "calib_status_worker") and self.calib_status_worker is not None:
-            if self.calib_status_worker.isRunning():
-                self.calib_status_worker.stop()
-                self.calib_status_worker.wait(2000)
-        if self.analysis_status_worker and self.analysis_status_worker.isRunning():
-            self.analysis_status_worker.stop()
-            self.analysis_status_worker.wait(1000)
+            # 2. 실행 중인 워커(Worker)들 안전하게 정리
+            
+            # 녹화 중인 경우 안전하게 중지
+            if hasattr(self, 'test_running') and self.test_running:
+                if self.recorder.is_recording:
+                    self.recorder.stop()
+                if self.recording_thread and self.recording_thread.isRunning():
+                    self.recording_thread.wait(3000)
 
-        event.accept()
+            # 업로드 워커 정리
+            if self.upload_worker and self.upload_worker.isRunning():
+                # 업로드는 강제 종료 시 서버 데이터가 꼬일 수 있으므로 주의가 필요합니다.
+                self.upload_worker.terminate() 
+                self.upload_worker.wait(1000)
+
+            # 분석 상태 폴링 워커 정리
+            if self.analysis_status_worker and self.analysis_status_worker.isRunning():
+                self.analysis_status_worker.stop() # stop()은 우리가 workers.py에서 정의한 메서드입니다.
+                self.analysis_status_worker.wait(2000)
+
+            # 캘리브레이션 관련 워커들 정리 (기존 FIX 반영)
+            for worker_name in ["calib_worker", "calib_status_worker"]:
+                worker = getattr(self, worker_name, None)
+                if worker and worker.isRunning():
+                    if hasattr(worker, 'stop'):
+                        worker.stop()
+                    worker.wait(2000)
+
+            event.accept()
