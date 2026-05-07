@@ -259,7 +259,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_server_url_changed(self) -> None:
-        """[FIX] 사용자가 Server URL을 수정하면 state와 ApiClient를 즉시 갱신합니다."""
+        """사용자가 Server URL을 수정하면 state와 ApiClient를 즉시 갱신합니다."""
         new_url = self.server_url_input.text().strip()
         if new_url and new_url != self.state.server_url:
             self.state.server_url = new_url
@@ -637,94 +637,98 @@ class MainWindow(QMainWindow):
 
     def _handle_test_finished(self) -> None:
             """
-            테스트 종료 처리: 마지막 로그 기록 -> 녹화 중지 -> 데이터 업로드 시작
+            테스트 종료 처리: 마지막 로그 기록 및 녹화 중지 (1회성 실행)
             """
-            # 1. 마지막 페이지 로그 종료 시간 기록
-            if hasattr(self, 'page_logs') and self.page_logs:
-                # start_time 직접 참조 대신 get_elapsed_time() 사용 (start_time=0 방어)
-                self.page_logs[-1]['end_video_ts'] = round(self.recorder.get_elapsed_time(), 3)
+            # 1. 마지막 페이지 로그 종료 시간 기록 (중복 기록 방지)
+            if not hasattr(self, 'is_finalized') or not self.is_finalized:
+                if hasattr(self, 'page_logs') and self.page_logs:
+                    # recorder에서 현재까지의 경과 시간을 가져와 마지막 로그 마감
+                    self.page_logs[-1]['end_video_ts'] = round(self.recorder.get_elapsed_time(), 3)
+                
+                # 2. 녹화 중지 및 스레드 자원 회수
+                if self.recorder.is_recording:
+                    self.recorder.stop()
+                    if self.recording_thread and self.recording_thread.isRunning():
+                        self.recording_thread.wait()
+                
+                self.test_running = False
+                self.is_finalized = True # 1회성 로직 완료 플래그
 
-            # 2. 녹화 중지
-            if self.recorder.is_recording:
-                self.recorder.stop()
-                if self.recording_thread and self.recording_thread.isRunning():
-                    self.recording_thread.wait()
-            
-            self.test_running = False
-            
             # 3. 화면 전환 (Index 3: 업로드 대기 화면)
             self._show_screen(3)
+            
+            # 4. 실제 업로드 프로세스 시작
+            self._start_upload_process()
+
+    def _start_upload_process(self) -> None:
+            """
+            [CL-REQ-31] 업로드 전용 경로: Presigned URL 발급 및 데이터 전송 시작
+            """
             self.is_uploading = True
+            self.p_bar.setValue(0)
             self.upload_status_label.setText("데이터를 정리하여 서버로 전송 중입니다...")
 
-            # 4. 업로드 워커 실행 (metadata 선전송 -> 영상 후전송 구조)
+            # 메타데이터 구성
             metadata = {
                 "page_logs": self.page_logs,
                 "task_results": self.task_results
             }
 
+            # hasattr뿐만 아니라 None 체크를 동시에 수행하여 AttributeError 방지
+            if hasattr(self, 'upload_worker') and self.upload_worker is not None:
+                if self.upload_worker.isRunning():
+                    self.upload_worker.quit()
+                    self.upload_worker.wait()
+
             from utils.workers import UploadWorker
+            # 새로운 워커 인스턴스 할당
             self.upload_worker = UploadWorker(
                 api_client=self.api,
                 video_path=self.video_output_path,
                 metadata=metadata
             )
 
-            # 시그널 연결 (기존에 정의한 _on_upload_progress, _on_upload_finished 사용)
+            # 시그널 연결
             self.upload_worker.progress.connect(self._on_upload_progress)
             self.upload_worker.finished.connect(self._on_upload_finished)
             self.upload_worker.start()
 
     def _on_upload_progress(self, message: str, value: Optional[int] = None) -> None:
-            """
-            업로드 진행 상황 업데이트
-            :param message: 표시할 텍스트 메시지
-            :param value: 프로그레스 바에 표시할 정수 값 (0~100)
-            """
-            self.upload_status_label.setText(message)
-            
-            # value 값이 들어오면 프로그레스 바를 업데이트합니다.
-            if value is not None:
-                self.p_bar.setValue(value)
+        """업로드 진행 상황 업데이트"""
+        self.upload_status_label.setText(message)
+        if value is not None:
+            self.p_bar.setValue(value)
 
     @Slot(bool, str)
     def _on_upload_finished(self, success: bool, message: str) -> None:
-        """
-        업로드 워커 종료 시 호출되는 슬롯
-        :param success: 업로드 성공 여부
-        :param message: 실패 사유 또는 성공 메시지
-        """
+        """업로드 워커 종료 시 호출되는 슬롯"""
         if success:
-            # 성공 시: 분석 폴링 시작
             self.upload_status_label.setText("✅ 업로드 성공! 분석을 시작합니다.")
+            self.is_finalized = False # 다음 테스트를 위해 플래그 초기화
             self._start_analysis_polling()
         else:
-            # 실패 시: 상태 리셋 및 UI 복구
-            self.is_uploading = False  # 상태 플래그 해제
-            self.p_bar.setValue(0)      # 프로그레스 바 초기화
+            self.is_uploading = False
             
-            # QMessageBox 설정 시 정확한 Enum 경로 사용
             msg_box = QMessageBox(self)
-            # QMessageBox.Critical -> QMessageBox.Icon.Critical
             msg_box.setIcon(QMessageBox.Icon.Critical) 
             msg_box.setWindowTitle("업로드 실패")
             msg_box.setText(f"데이터 전송에 실패했습니다.\n사유: {message}")
             
-            # QMessageBox.ActionRole -> QMessageBox.ButtonRole.ActionRole
+            # 버튼 설정
             retry_btn = msg_box.addButton("다시 시도", QMessageBox.ButtonRole.ActionRole)
-            # QMessageBox.RejectRole -> QMessageBox.ButtonRole.RejectRole
             cancel_btn = msg_box.addButton("테스트 화면으로 돌아가기", QMessageBox.ButtonRole.RejectRole)
             
             msg_box.exec()
             
             if msg_box.clickedButton() == retry_btn:
-                # 다시 시도: 핸들러 재호출 (처음부터 다시 시퀀스 시작)
-                self._handle_test_finished()
+                # 처음부터 다시 하는 대신, 업로드 로직만 재실행
+                self._start_upload_process()
             else:
-                # 복구: 테스트 화면(Index 2)으로 되돌리기
-                self.test_running = True # 다시 테스트 가능 상태로 설정
+                # 복구 및 초기화
+                self.is_finalized = False 
+                self.test_running = True 
                 self._show_screen(2)
-
+                
     def _start_analysis_polling(self) -> None:
         """분석 상태 감시 시작"""
         from utils.workers import AnalysisStatusWorker

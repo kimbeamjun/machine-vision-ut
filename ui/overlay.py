@@ -4,7 +4,7 @@ from PySide6.QtGui import QPainter, QColor, QPen
 
 class RegionSelector(QWidget):
     """
-    CL-REQ-11~13: 화면 전체에 투명 오버레이를 띄워 녹화 영역을 드래그로 선택함
+    화면 전체에 투명 오버레이를 띄워 녹화 영역을 드래그로 선택함
     """
     region_selected = Signal(QRect) # 선택 완료 시 픽셀 좌표(QRect)를 전달함
 
@@ -26,7 +26,7 @@ class RegionSelector(QWidget):
 
     def paintEvent(self, event) -> None:
         """
-        CL-REQ-13: 사용자가 드래그 중인 영역을 반투명 박스로 시각화함
+        사용자가 드래그 중인 영역을 반투명 박스로 시각화함
         """
         painter = QPainter(self)
         # 배경을 살짝 어둡게 (선택 영역만 밝게 보임)
@@ -61,7 +61,7 @@ class RegionSelector(QWidget):
             self.is_selecting = False
             rect = QRect(self.begin, self.end).normalized()
             
-            # 너무 작은 영역은 무시하거나 처리 (요구사항 3.2: w, h > 0)
+            # 너무 작은 영역은 무시하거나 처리
             if rect.width() > 5 and rect.height() > 5:
                 self.region_selected.emit(rect)
             
