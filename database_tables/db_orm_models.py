@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Text, JSON, ForeignKey, DateTime, func
+from sqlalchemy import Column, Integer, String, Float, Text, JSON, ForeignKey, DateTime, func, UniqueConstraint
 from sqlalchemy.orm import relationship
 from app_settings.db_connection import Base
 
@@ -12,11 +12,26 @@ class SessionModel(Base):
     updated_at = Column(DateTime, nullable=True, onupdate=func.now())
 
     calibrations = relationship("CalibrationModel", back_populates="session", cascade="all, delete-orphan")
+    calibration_points = relationship("CalibrationPointModel", back_populates="session", cascade="all, delete-orphan")
     page_logs = relationship("PageLogModel", back_populates="session", cascade="all, delete-orphan")
     page_summaries = relationship("PageSummaryModel", back_populates="session", cascade="all, delete-orphan")
     report = relationship("ReportModel", back_populates="session", uselist=False, cascade="all, delete-orphan")
     stt_segments = relationship("SttSegmentModel", back_populates="session", cascade="all, delete-orphan")
     task_results = relationship("TaskResultModel", back_populates="session", cascade="all, delete-orphan")
+
+class CalibrationPointModel(Base):
+    __tablename__ = "calibration_points"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(Integer, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
+    point_no = Column(Integer, nullable=False)
+    screen_x = Column(Float, nullable=False)
+    screen_y = Column(Float, nullable=False)
+    object_key = Column(String(500), nullable=False)
+    session = relationship("SessionModel", back_populates="calibration_points")
+
+    __table_args__ = (
+        UniqueConstraint('session_id', 'point_no', name='uq_calibration_points'),
+    )
 
 class CalibrationModel(Base):
     __tablename__ = "calibrations"

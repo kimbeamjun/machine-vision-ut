@@ -10,14 +10,13 @@ class ViewportRegion(BaseModel):
 class SessionCreateReq(BaseModel):
     viewport_region: ViewportRegion
 
-class PresignedUrlReq(BaseModel):
-    session_id: int
-    file_type: Literal["video", "screenshot", "calibration"]
+class CalibPresignedUrlReq(BaseModel):
+    point_no: int
+    screen_x: float
+    screen_y: float
 
-class CalibrateReq(BaseModel):
-    object_keys: List[str]
-    screen_xs: List[float]
-    screen_ys: List[float]
+class PresignedUrlReq(BaseModel):
+    file_type: Literal["video", "recording", "screenshot", "calibration"]
 
 class PageLog(BaseModel):
     page_no: int
@@ -28,7 +27,7 @@ class PageLog(BaseModel):
 
 class TaskResult(BaseModel):
     task_order: int
-    result: Literal["완료", "실패"]
+    result: Literal["success", "fail"]
     duration_sec: Optional[float] = None
 
 class MetadataReq(BaseModel):

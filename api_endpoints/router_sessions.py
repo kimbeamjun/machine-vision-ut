@@ -2,13 +2,16 @@ from fastapi import APIRouter, HTTPException, status, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.dialects.mysql import insert
 from datetime import timedelta
 import uuid
 
 from app_settings.db_connection import get_db
-from database_tables.db_orm_models import SessionModel, CalibrationModel, PageLogModel, TaskResultModel, ReportModel
-from api_data_formats.api_request_schemas import SessionCreateReq, PresignedUrlReq, CalibrateReq, MetadataReq
+from database_tables.db_orm_models import SessionModel, CalibrationModel, PageLogModel, TaskResultModel, ReportModel, CalibrationPointModel
+from api_data_formats.api_request_schemas import SessionCreateReq, PresignedUrlReq, CalibPresignedUrlReq, MetadataReq
 from app_settings.storage_minio import minio_client, BUCKET_NAME
+from celery_app import app as celery_app
+import asyncio
 
 router = APIRouter(prefix="/sessions", tags=["Sessions"])
 
@@ -21,20 +24,64 @@ async def create_session(req: SessionCreateReq, db: AsyncSession = Depends(get_d
     db.add(new_session)
     await db.commit()
     await db.refresh(new_session)
-    return {"session_id": new_session.id, "status": new_session.status}
+    return {"session_id": new_session.id}
 
-@router.post("/presigned-url", status_code=status.HTTP_200_OK)
-async def get_presigned_url(req: PresignedUrlReq, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(SessionModel).where(SessionModel.id == req.session_id))
+@router.post("/{id}/calibrate/presigned-url", status_code=status.HTTP_200_OK)
+async def get_calibration_presigned_url(id: int, req: CalibPresignedUrlReq, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(SessionModel).where(SessionModel.id == id))
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="해당 session_id를 찾을 수 없습니다.")
     
     try:
-        ext = "png" if req.file_type == "screenshot" else "mp4"
-        unique_filename = f"{uuid.uuid4().hex[:8]}.{ext}"
-        object_key = f"{req.file_type}s/session_{req.session_id}/{unique_filename}"
+        object_key = f"sessions/session_{id}/calibration_{req.point_no}.mp4"
         
+        url = minio_client.presigned_put_object(
+            BUCKET_NAME,
+            object_key,
+            expires=timedelta(seconds=3600)
+        )
+        
+        # ON DUPLICATE KEY UPDATE (Upsert)
+        stmt = insert(CalibrationPointModel).values(
+            session_id=id,
+            point_no=req.point_no,
+            screen_x=req.screen_x,
+            screen_y=req.screen_y,
+            object_key=object_key
+        )
+        stmt = stmt.on_duplicate_key_update(
+            screen_x=stmt.inserted.screen_x,
+            screen_y=stmt.inserted.screen_y,
+            object_key=stmt.inserted.object_key
+        )
+        await db.execute(stmt)
+        await db.commit()
+        
+        return {
+            "presigned_url": url,
+            "object_key": object_key
+        }
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"MinIO/DB 연결 오류: {str(e)}")
+
+@router.post("/{id}/presigned-url", status_code=status.HTTP_200_OK)
+async def get_presigned_url(id: int, req: PresignedUrlReq, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(SessionModel).where(SessionModel.id == id))
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="해당 session_id를 찾을 수 없습니다.")
+    
+    try:
+        if req.file_type == "recording":
+            object_key = f"sessions/session_{id}/recording.mp4"
+        else:
+            ext = "png" if req.file_type in ["screenshot"] else "mp4"
+            unique_filename = f"{uuid.uuid4().hex[:8]}.{ext}"
+            folder_name = f"{req.file_type}s"
+            object_key = f"{folder_name}/session_{id}/{unique_filename}"
+            
         url = minio_client.presigned_put_object(
             BUCKET_NAME,
             object_key,
@@ -42,34 +89,54 @@ async def get_presigned_url(req: PresignedUrlReq, db: AsyncSession = Depends(get
         )
         return {
             "presigned_url": url,
-            "object_key": object_key,
-            "expires_in": 3600
+            "object_key": object_key
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"MinIO 연결 오류: {str(e)}")
 
-@router.post("/{id}/calibrate", status_code=status.HTTP_202_ACCEPTED)
-async def start_calibration(id: int, req: CalibrateReq, db: AsyncSession = Depends(get_db)):
+@router.post("/{id}/calibrate/start", status_code=status.HTTP_200_OK)
+async def start_calibration(id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(SessionModel).where(SessionModel.id == id))
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="해당 session_id를 찾을 수 없습니다.")
     
-    if len(req.object_keys) != 5 or len(req.screen_xs) != 5 or len(req.screen_ys) != 5:
-        raise HTTPException(status_code=400, detail="캘리브레이션 데이터는 5개여야 합니다.")
-        
-    print(f"Session {id}: 캘리브레이션 분석 작업 큐(Queue A) 등록 완료 (Mocking)")
-    return {"message": "캘리브레이션 분석이 큐에 등록되었습니다.", "session_id": id}
-
-@router.get("/{id}/calibrate/status")
-async def get_calibration_status(id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(CalibrationModel).where(CalibrationModel.session_id == id))
-    cals = result.scalars().all()
+    # Fetch calibration points
+    calib_result = await db.execute(select(CalibrationPointModel).where(CalibrationPointModel.session_id == id))
+    points = calib_result.scalars().all()
     
-    if len(cals) == 5:
-        return {"status": "done"}
-    else:
-        return {"status": "analyzing"}
+    points_list = []
+    for p in points:
+        points_list.append({
+            "point_no": p.point_no,
+            "screen_x": p.screen_x,
+            "screen_y": p.screen_y,
+            "video_object_key": p.object_key
+        })
+        
+    print(f"[FASTAPI] Session {id}: 캘리브레이션 분석 작업 큐(Queue A) 적재")
+    celery_app.send_task(
+        "celery_app.analyze_calibration", 
+        args=[id], 
+        kwargs={"calibration_points": points_list}
+    )
+    
+    # 동기 대기 로직 (최대 5분 대기)
+    print(f"[FASTAPI] Session {id}: 캘리브레이션 분석 결과 대기 중...")
+    max_wait_sec = 300
+    for _ in range(max_wait_sec):
+        await db.commit()  # DB 트랜잭션을 갱신하여 최신 상태를 읽어올 수 있도록 함
+        await db.refresh(session)
+        if session.status == "calibrated":
+            return {"status": "success"}
+        elif session.status == "calib_failed":
+            # 실제로는 failed_points를 돌려줘야 하나, 현재 모델에 필드가 없으므로 생략 또는 추가 쿼리 필요
+            return {"status": "failed", "failed_points": []} 
+        elif session.status == "error":
+            return {"status": "error"}
+        await asyncio.sleep(1)
+        
+    raise HTTPException(status_code=504, detail="AI 서버 응답 시간 초과")
 
 @router.post("/{id}/metadata", status_code=status.HTTP_200_OK)
 async def save_metadata(id: int, req: MetadataReq, db: AsyncSession = Depends(get_db)):
@@ -98,6 +165,52 @@ async def save_metadata(id: int, req: MetadataReq, db: AsyncSession = Depends(ge
         raise HTTPException(status_code=500, detail=f"데이터 저장 중 오류 발생: {str(e)}")
         
     return {"saved": True, "page_logs": len(req.page_logs), "task_results": len(req.task_results)}
+
+@router.post("/{id}/analyze", status_code=status.HTTP_202_ACCEPTED)
+async def analyze_session(id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(SessionModel).where(SessionModel.id == id))
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="해당 session_id를 찾을 수 없습니다.")
+        
+    # 데이터 조회
+    # (실제로는 calibrations, page_logs, task_results 모두 조회해서 kwargs로 넘겨야 하지만 간단히 축약)
+    calib_res = await db.execute(select(CalibrationModel).where(CalibrationModel.session_id == id))
+    calibrations = [{"point_no": c.point_no, "screen_x": c.screen_x, "screen_y": c.screen_y, "gaze_x": c.gaze_x, "gaze_y": c.gaze_y} for c in calib_res.scalars().all()]
+    
+    page_logs_res = await db.execute(select(PageLogModel).where(PageLogModel.session_id == id))
+    page_logs = [{"page_no": p.page_no, "url": p.url, "start_video_ts": p.start_video_ts, "end_video_ts": p.end_video_ts, "screenshot_path": p.screenshot_path} for p in page_logs_res.scalars().all()]
+    
+    task_res = await db.execute(select(TaskResultModel).where(TaskResultModel.session_id == id))
+    task_results = [{"task_order": t.task_order, "result": t.result, "duration_sec": t.duration_sec} for t in task_res.scalars().all()]
+    
+    kwargs = {
+        "video_path": session.video_path,
+        "viewport_region": session.viewport_region,
+        "calibrations": calibrations,
+        "page_logs": page_logs,
+        "task_results": task_results
+    }
+    
+    celery_app.send_task(
+        "celery_app.analyze_session", 
+        args=[id], 
+        kwargs=kwargs
+    )
+    session.status = "analyzing"
+    
+    res_rep = await db.execute(select(ReportModel).where(ReportModel.session_id == id))
+    report = res_rep.scalar_one_or_none()
+    if not report:
+        report = ReportModel(session_id=id, status="generating")
+        db.add(report)
+    else:
+        report.status = "generating"
+        
+    await db.commit()
+    print(f"[FASTAPI] Session {id}: 본 분석 작업 큐(Queue A) 적재 완료")
+    
+    return {"status": "accepted"}
 
 @router.get("/{id}/report")
 async def get_report(id: int, db: AsyncSession = Depends(get_db)):

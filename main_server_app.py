@@ -32,10 +32,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="UDT : UT 자동화 AI", lifespan=lifespan)
 
 # 라우터 조립
-app.include_router(router_sessions.router)
+app.include_router(router_sessions.router, prefix="/api/v1")
 app.include_router(router_webhooks.router)
 
 if __name__ == "__main__":
     import uvicorn
     # uvicorn.run() 에서는 항상 파일명:app 을 문자열로 줘야 리로드가 잘 됨
-    uvicorn.run("main_server_app:app", host="0.0.0.0", port=8001, reload=True)
+    uvicorn.run("main_server_app:app", host="0.0.0.0", port=8000, reload=True)

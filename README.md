@@ -64,9 +64,9 @@ pip install -r requirements.txt
 
 ### 3. 서버 실행
 ```bash
-uvicorn main_server_app:app --host 0.0.0.0 --port 8001 --reload
+uvicorn main_server_app:app --host 0.0.0.0 --port 8000 --reload
 ```
-서버가 정상적으로 실행되면 `http://localhost:8001/docs` 에 접속하여 Swagger UI를 통해 모든 API를 테스트해 볼 수 있습니다.
+서버가 정상적으로 실행되면 `http://localhost:8000/docs` 에 접속하여 Swagger UI를 통해 모든 API를 테스트해 볼 수 있습니다.
 
 
 
