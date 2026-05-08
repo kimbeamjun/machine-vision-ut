@@ -63,14 +63,18 @@ class MainWindow(QMainWindow):
         self.is_uploading = False
         self.video_output_path = os.path.abspath("test_video.mp4")
         self.test_running = False
-        self.task_results = []   # 태스크 수행 결과 (dict 형태 등)
+        
+        self.tasks = []               # 서버에서 받을 태스크 목록
+        self.current_task_index = 0   # 현재 몇 번째 태스크인지 (0부터 시작)
+        self.task_results = []        # 결과 저장 리스트
+        self.current_task_info = None # 현재 진행 중인 태스크 임시 저장
 
         # 3. 설정 및 스레드 풀 객체 생성
         self.state = ClientState()
         self.thread_pool = QThreadPool.globalInstance()
 
         # 4. API 클라이언트 초기화
-        config = ApiConfig(base_url="http://10.10.10.113:8001")
+        config = ApiConfig(base_url="http://10.10.10.113:8000") # 명세서 MS-1 기준
         self.api = ApiClient(config)
 
         # 5. UI 전체 설정
@@ -101,7 +105,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self._build_test_screen())         # Index 2 (본 테스트)
         self.stack.addWidget(self._build_upload_screen())       # Index 3 (업로드/분석 대기)
         self.stack.addWidget(self._build_report_screen())       # Index 4 (결과 리포트)
-
+        
         # 9. 초기 화면 표시
         self._show_screen(0)
 
@@ -290,7 +294,7 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────
     # 화면 1: 캘리브레이션
     # ──────────────────────────────────────────────
-
+                
     def _build_calibration_screen(self) -> QWidget:
         """[화면 1] 5점 캘리브레이션 화면"""
         body = QWidget()
@@ -378,26 +382,36 @@ class MainWindow(QMainWindow):
         pass  # 업로드 완료는 on_calibration_upload_done에서 처리
 
     def on_calibration_ui_finished(self, captured_data: list) -> None:
-        """웹캠 촬영 완료 후 업로드 워커 실행 — 분석 대기 화면으로 전환"""
+        """웹캠 촬영 완료 → 업로드·분석 대기 화면으로 전환 후 CalibrationWorker 실행"""
         self._show_screen(3)
         self.p_bar.setValue(10)
+        self.upload_status_label.setText("캘리브레이션 영상 업로드 중...")
 
         self.calib_worker = CalibrationWorker(self.api, captured_data)
-        self.calib_worker.progress.connect(lambda msg: print(f"[캘리브레이션] {msg}"))
+
+        # 진행 상황 → 상태 라벨 + 콘솔
+        self.calib_worker.progress.connect(
+            lambda msg: (
+                self.upload_status_label.setText(msg),
+                print(f"[캘리브레이션] {msg}")
+            )
+        )
+        # 업로드/시스템 오류 (CL-2/CL-3 실패, 예외 등)
         self.calib_worker.finished.connect(self.on_calibration_upload_done)
+        # [FIX] CL-4 동기 응답: 성공 → calibration_done, 실패 → calibration_failed (폴링 불필요)
+        self.calib_worker.calibration_done.connect(self.on_calibration_approved)
+        self.calib_worker.calibration_failed.connect(self._on_calibration_failed)
         self.calib_worker.start()
 
     def on_calibration_upload_done(self, success: bool, message: str) -> None:
-        """업로드 완료 후 캘리브레이션 AI 분석 상태 폴링 시작"""
-        if success:
-            self.p_bar.setValue(50)
-            self.calib_status_worker = CalibrationStatusWorker(self.api)
-            self.calib_status_worker.status_updated.connect(self._update_calibration_status)
-            self.calib_status_worker.calibration_done.connect(self.on_calibration_approved)
-            self.calib_status_worker.calibration_failed.connect(self._on_calibration_failed)
-            self.calib_status_worker.start()
-        else:
-            QMessageBox.warning(self, "업로드 실패", f"캘리브레이션 영상 업로드 실패:\n{message}")
+        """
+        [FIX] CalibrationWorker.finished는 이제 업로드 실패·시스템 오류 시에만 호출된다.
+        CL-4 분석 성공/실패는 calibration_done / calibration_failed 시그널이 담당.
+        CalibrationStatusWorker 폴링은 PDF 명세에 없는 엔드포인트를 사용하므로 제거.
+        """
+        if not success:
+            self.upload_status_label.setText(f"❌ 오류 발생: {message}")
+            QMessageBox.warning(self, "캘리브레이션 오류", f"처리 중 오류가 발생했습니다:\n{message}")
             self._show_screen(1)
 
     def _update_calibration_status(self, status: str) -> None:
@@ -409,8 +423,9 @@ class MainWindow(QMainWindow):
             self.p_bar.setValue(75)
 
     def on_calibration_approved(self, result_data: dict) -> None:
-        """캘리브레이션 AI 분석 완료 → 화면 녹화 시작"""
+        """CL-4 응답 status=success → 테스트 화면으로 이동"""
         self.p_bar.setValue(100)
+        self.upload_status_label.setText("✅ 캘리브레이션 완료!")
         QMessageBox.information(self, "준비 완료", "AI 서버가 시선을 학습했습니다. 테스트를 시작합니다.")
         self._show_screen(2)
         self.start_test()
@@ -474,32 +489,14 @@ class MainWindow(QMainWindow):
             self.task_layout.addSpacing(10)
             self.task_layout.addWidget(section_label("📋 테스트 시나리오"))
 
-            # --- 태스크 버튼 생성 로직 ---
-            self.tasks = ["메인 로고 클릭", "검색바 입력", "상세 페이지 이동"]
-            for i, t_name in enumerate(self.tasks, 1):
-                t_group = QGroupBox(f"Task {i}")
-                t_group_layout = QVBoxLayout(t_group)
-                label = QLabel(t_name)
-                
-                btn_start = QPushButton("시작")
-                btn_success = QPushButton("성공")
-                btn_success.setVisible(False)
-                btn_fail = QPushButton("실패")
-                btn_fail.setVisible(False)
-
-                # 시그널 연결
-                btn_start.clicked.connect(lambda chk, n=t_name, o=i, s=btn_start, ok=btn_success, no=btn_fail: 
-                                        self._ui_start_task(n, o, s, ok, no))
-                btn_success.clicked.connect(lambda chk, ok=btn_success, no=btn_fail: self._ui_finish_task(True, ok, no))
-                btn_fail.clicked.connect(lambda chk, ok=btn_success, no=btn_fail: self._ui_finish_task(False, ok, no))
-
-                t_group_layout.addWidget(label)
-                t_group_layout.addWidget(btn_start)
-                t_group_layout.addWidget(btn_success)
-                t_group_layout.addWidget(btn_fail)
-                self.task_layout.addWidget(t_group)
-
-            self.task_layout.addStretch()
+            # [FIX] 하드코딩 제거 → tasks_config.json 또는 기본값 로드
+            self.tasks = self._load_tasks_config()
+            self.task_layout.addStretch()   # 태스크 버튼은 start_test()에서 동적 생성
+            self._task_group_container = QWidget()
+            self._task_group_layout = QVBoxLayout(self._task_group_container)
+            self._task_group_layout.setContentsMargins(0, 0, 0, 0)
+            self.task_layout.insertWidget(self.task_layout.count() - 1, self._task_group_container)
+            self._rebuild_task_buttons()
 
             # 하단 종료 버튼
             btn_finish = QPushButton("테스트 종료 및 데이터 전송")
@@ -510,6 +507,76 @@ class MainWindow(QMainWindow):
             layout.addWidget(main)
             layout.addWidget(task_panel)
             return self._app_frame(body, "recording")
+
+    def _load_tasks_config(self) -> List[str]:
+        """
+        tasks_config.json에서 태스크 이름 목록을 읽어온다.
+        파일이 없거나 파싱 실패 시 기본값을 반환한다.
+        tasks_config.json 위치: 프로젝트 루트 (main.py와 같은 디렉토리)
+        """
+        import json
+        config_path = os.path.join(ROOT_DIR, "tasks_config.json")
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            tasks = [t["name"] for t in data.get("tasks", []) if "name" in t]
+            if tasks:
+                print(f"[태스크] tasks_config.json 로드 완료: {tasks}")
+                return tasks
+        except FileNotFoundError:
+            print(f"[태스크] tasks_config.json 없음 → 기본값 사용 ({config_path})")
+        except Exception as e:
+            print(f"[태스크] tasks_config.json 파싱 오류 → 기본값 사용: {e}")
+
+        # 기본 태스크 (개발/테스트용)
+        return ["메인 로고 클릭", "검색바 입력", "상세 페이지 이동"]
+
+    def _rebuild_task_buttons(self) -> None:
+        """
+        self.tasks 목록을 기반으로 태스크 QGroupBox 버튼들을 동적으로 재생성한다.
+        start_test() 호출 시 tasks_config.json을 다시 읽어 갱신할 수 있다.
+        """
+        # [수정] 기존 버튼 제거 시 None 체크를 추가하여 Pylance 오류 해결
+        while self._task_group_layout.count():
+            item = self._task_group_layout.takeAt(0)
+            if item is not None:
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
+                else:
+                    # 위젯이 없는 아이템(예: Spacer)인 경우 레이아웃에서 안전하게 제거
+                    pass
+
+        for i, t_name in enumerate(self.tasks, 1):
+            t_group = QGroupBox(f"Task {i}")
+            t_group_layout = QVBoxLayout(t_group)
+
+            label = QLabel(t_name)
+            btn_start = QPushButton("시작")
+            btn_success = QPushButton("성공")
+            btn_success.setVisible(False)
+            btn_fail = QPushButton("실패")
+            btn_fail.setVisible(False)
+
+            # 상세 주석: 각 버튼에 람다를 연결하여 태스크 상태 제어
+            btn_start.clicked.connect(
+                lambda chk, n=t_name, o=i, s=btn_start, ok=btn_success, no=btn_fail:
+                self._ui_start_task(n, o, s, ok, no)
+            )
+            btn_success.clicked.connect(
+                lambda chk, ok=btn_success, no=btn_fail:
+                self._ui_finish_task(True, ok, no)
+            )
+            btn_fail.clicked.connect(
+                lambda chk, ok=btn_success, no=btn_fail:
+                self._ui_finish_task(False, ok, no)
+            )
+
+            t_group_layout.addWidget(label)
+            t_group_layout.addWidget(btn_start)
+            t_group_layout.addWidget(btn_success)
+            t_group_layout.addWidget(btn_fail)
+            self._task_group_layout.addWidget(t_group)
 
     def _setup_camera(self):
         """웹캠 초기화 및 캡처 세션 설정"""
@@ -532,31 +599,46 @@ class MainWindow(QMainWindow):
             print(f"⚠️ 카메라 설정을 완료할 수 없습니다: {e}")
 
     # --- 태스크 제어용 헬퍼 함수 ---
-
-    def _ui_start_task(self, name, order, btn_s, btn_ok, btn_no):
-        """UI에서 시작 버튼 클릭 시 호출"""
-        self._start_task(name, order) # 이전에 만든 데이터 기록 함수 호출
-        btn_s.setEnabled(False)      # 시작 버튼 비활성화
+    def _ui_start_task(self, name: str, order: int, btn_s: QPushButton, btn_ok: QPushButton, btn_no: QPushButton):
+        """인자 5개를 정확히 받아 처리 (MainWindow 내부 정의)"""
+        # 1. 데이터 기록 시작 (ScreenRecorder 등 연동)
+        self._start_task(name, order)
+        
+        # 2. 버튼 상태 변경
+        btn_s.setEnabled(False)
         btn_s.setText("진행 중...")
-        btn_ok.setVisible(True)      # 성공 버튼 표시
-        btn_no.setVisible(True)      # 실패 버튼 표시
+        btn_ok.setVisible(True)
+        btn_no.setVisible(True)
 
-    def _ui_finish_task(self, is_success, btn_ok, btn_no):
-        """UI에서 성공/실패 버튼 클릭 시 호출"""
+    def _ui_finish_task(self, is_success: bool, btn_ok: QPushButton, btn_no: QPushButton):
+        """인자 3개를 정확히 받아 처리"""
+        # 1. 결과 데이터 저장 (is_success 반영)
         self._finish_task(is_success)
+        
+        # 2. UI 비활성화
         btn_ok.setEnabled(False)
         btn_no.setEnabled(False)
-        status_text = "✅ 성공" if is_success else "❌ 실패"
-        # getParent() 는 Qt 메서드가 아님 → parentWidget() 으로 교체
-        group_box = btn_ok.parentWidget()
-        if group_box is not None:
-            group_box.setTitle(f"Task 완료 ({status_text})")
+        
+        # 3. 다음 태스크 인덱스 증가 및 종료 체크
+        if self.current_task_index < len(self.tasks) - 1:
+            self.current_task_index += 1
+        else:
+            # 모든 태스크 완료 시 v5 명세에 따른 종료 처리
+            self._handle_test_finished()
 
     def start_test(self) -> None:
-        """테스트 시작: 화면 녹화 시작 + 첫 페이지 로그 기록"""
+        """테스트 시작: 화면 녹화 시작 + 태스크 목록 갱신"""
         self.page_logs.clear()
         self.state.task_results.clear()
+        self.task_results.clear()
+        self.current_task_index = 0
         self.test_running = True
+        self.is_finalized = False
+
+        # [FIX] 테스트 시작마다 tasks_config.json을 다시 읽어 태스크 버튼 재생성
+        self.tasks = self._load_tasks_config()
+        self._rebuild_task_buttons()
+
         self.video_output_path = os.path.abspath("test_video.mp4")
         self.recording_thread = RecordingWorker(self.recorder, self.viewport, self.video_output_path)
         self.recording_thread.start()
@@ -788,10 +870,10 @@ class MainWindow(QMainWindow):
         # 1. 소요 시간 계산
         duration = round(time.time() - self.current_task_info["start_time"], 2)
         
-        # 2. 결과 데이터 구성 (API 명세: result = "completed" | "failed")
+        # 2. 결과 데이터 구성 (PDF 명세 CL-5: result = "success" | "fail", 한글 금지)
         task_entry = {
             "task_order": self.current_task_info["task_order"],
-            "result": "completed" if is_success else "failed",  # [FIX] "success"/"fail" → "completed"/"failed"
+            "result": "success" if is_success else "fail",
             "duration_sec": duration,
         }
 
