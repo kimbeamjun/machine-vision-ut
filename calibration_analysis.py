@@ -1,5 +1,9 @@
 # calibration_analysis.py
-# 캘리브레이션 영상 5개에서 MediaPipe로 홍채 좌표 추출 → calibrations 테이블 저장
+# 캘리브레이션 영상 5개에서 MediaPipe로 홍채 좌표 추출
+#
+# 변경사항 (명세서 v5 기준):
+# - save_calibrations() 호출 제거 (DB 저장은 메인 서버 담당)
+# - 결과를 반환값으로만 전달 → celery_app.py가 큐B에 실어서 메인 서버로 전송
 
 import cv2
 import numpy as np
@@ -8,8 +12,6 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 import os
 import urllib.request
-
-from db import save_calibrations
 
 LEFT_IRIS_CENTER  = 473
 RIGHT_IRIS_CENTER = 468
@@ -29,8 +31,8 @@ def _ensure_model():
 
 def _extract_iris_from_video(video_path: str) -> tuple[float, float] | None:
     """
-    짧은 캘리브레이션 영상에서 홍채 좌표 평균값 추출
-    중간 프레임들의 홍채 좌표를 평균내어 안정적인 값 반환
+    캘리브레이션 영상에서 홍채 좌표 평균값 추출
+    앞뒤 20% 프레임 제외, 중간 60% 구간만 사용 (눈 깜빡임 노이즈 제거)
     """
     _ensure_model()
 
@@ -51,7 +53,6 @@ def _extract_iris_from_video(video_path: str) -> tuple[float, float] | None:
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    # 앞뒤 20% 프레임 제외, 중간 60% 구간만 사용 (눈 깜빡임 등 노이즈 제거)
     start_frame = int(total_frames * 0.2)
     end_frame   = int(total_frames * 0.8)
 
@@ -100,27 +101,30 @@ def run_calibration_analysis(
         session_id: 세션 ID
         calibration_videos: [
             {
-                "point_no": 1,          # 1~5
-                "screen_x": 0.1,        # 화면 기준점 x (비율)
-                "screen_y": 0.1,        # 화면 기준점 y (비율)
-                "local_path": "/tmp/cal_1.mp4"  # 로컬 다운로드 경로
+                "point_no":   1,
+                "screen_x":   0.1,
+                "screen_y":   0.1,
+                "local_path": "/tmp/cal_1.mp4"
             }, ...
         ]
 
     Returns:
         {
-            "success": True,
-            "calibrations": [{"point_no", "screen_x", "screen_y", "gaze_x", "gaze_y"}, ...]
-            "failed_points": [2, 4]  # 얼굴 미감지된 포인트 번호
+            "success":      bool,   # True = failed_points < 2
+            "calibrations": [{"point_no","screen_x","screen_y","gaze_x","gaze_y"}, ...],
+            "failed_points": [2, 4]
         }
+
+    ※ DB 저장 없음. 반환값을 celery_app.py가 큐B에 실어 메인 서버로 전달.
+       메인 서버가 failed_points 개수를 판단하여 calibrations 테이블에 저장.
     """
     calibrations  = []
     failed_points = []
 
     for cal in sorted(calibration_videos, key=lambda x: x["point_no"]):
-        point_no  = cal["point_no"]
-        screen_x  = cal["screen_x"]
-        screen_y  = cal["screen_y"]
+        point_no   = cal["point_no"]
+        screen_x   = cal["screen_x"]
+        screen_y   = cal["screen_y"]
         video_path = cal["local_path"]
 
         print(f"[Calibration] point {point_no} 분석 중...")
@@ -141,12 +145,8 @@ def run_calibration_analysis(
         })
         print(f"[Calibration] point {point_no} 완료: gaze=({gaze_x:.4f}, {gaze_y:.4f})")
 
-    # DB 저장
-    if calibrations:
-        save_calibrations(session_id, calibrations)
-
     return {
-        "success":        len(failed_points) == 0,
-        "calibrations":   calibrations,
-        "failed_points":  failed_points,
+        "success":       len(failed_points) < 2,   # 실패 2개 미만이면 성공
+        "calibrations":  calibrations,              # 성공한 포인트만 포함
+        "failed_points": failed_points,
     }

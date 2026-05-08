@@ -1,15 +1,18 @@
-# ai_server/analysis/whisper_analysis.py
-# 음성 분석: ffmpeg 오디오 추출 → Whisper medium STT → stt_segments DB 저장
+# whisper_analysis.py
+# 음성 분석: ffmpeg 오디오 추출 → Whisper medium STT
+#
+# 변경사항 (명세서 v5 기준):
+# - save_stt_segments() 호출 제거 (DB 저장은 메인 서버 담당)
+# - stt_segments를 반환값으로만 전달 → celery_app.py가 큐B에 실어서 메인 서버로 전송
 
 import os
 import subprocess
 import tempfile
 import whisper
 
-from db import save_stt_segments
-
 # Whisper 모델 싱글턴 (프로세스당 1회 로드)
 _whisper_model = None
+
 
 def _get_whisper_model():
     global _whisper_model
@@ -23,10 +26,10 @@ def _extract_audio(video_path: str, audio_path: str):
     cmd = [
         "ffmpeg", "-y",
         "-i", video_path,
-        "-vn",                     # 비디오 스트림 제외
-        "-acodec", "pcm_s16le",    # Whisper가 선호하는 16-bit PCM
-        "-ar", "16000",            # 16kHz 샘플레이트
-        "-ac", "1",                # 모노
+        "-vn",
+        "-acodec", "pcm_s16le",
+        "-ar", "16000",
+        "-ac", "1",
         audio_path,
     ]
     result = subprocess.run(cmd, capture_output=True, timeout=300)
@@ -37,7 +40,7 @@ def _extract_audio(video_path: str, audio_path: str):
 def _calculate_silence(segments: list[dict]) -> list[dict]:
     """
     발화 구간 간 공백 시간(silence_sec) 계산
-    첫 번째 발화 silence_sec = 0.0 (팀 내 합의 사항)
+    첫 번째 발화 silence_sec = 0.0
     """
     result = []
     for i, seg in enumerate(segments):
@@ -59,16 +62,18 @@ def run_whisper_analysis(
 
     Args:
         video_local_path: 로컬 영상 경로
-        session_id: 세션 ID
-        timeout_sec: Whisper 타임아웃 (초)
+        session_id      : 세션 ID (로그용)
+        timeout_sec     : Whisper 타임아웃 (초)
 
     Returns:
         {
-            "stt_segments": [{"start_ts", "end_ts", "text", "silence_sec"}, ...],
-            "skipped": bool  # 타임아웃 시 True
+            "stt_segments": [{"start_ts","end_ts","text","silence_sec"}, ...],
+            "skipped": bool
         }
+
+    ※ DB 저장 없음. 반환값을 celery_app.py가 큐B에 실어 메인 서버로 전달.
+       메인 서버가 stt_segments 테이블에 저장.
     """
-    # 임시 오디오 파일
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_audio:
         audio_path = tmp_audio.name
 
@@ -77,20 +82,19 @@ def run_whisper_analysis(
         _extract_audio(video_local_path, audio_path)
 
         # 2. Whisper STT
-        model = _get_whisper_model()
+        model  = _get_whisper_model()
         result = model.transcribe(
             audio_path,
             language="ko",
             word_timestamps=False,
-            no_speech_threshold=0.6,   # VAD: no_speech_prob > 0.6 필터
+            no_speech_threshold=0.6,
             condition_on_previous_text=True,
             verbose=False,
         )
 
-        # 3. 발화 구간 파싱
+        # 3. 발화 구간 파싱 + VAD 필터
         raw_segments = []
         for seg in result.get("segments", []):
-            # no_speech_prob 필터 (VAD)
             if seg.get("no_speech_prob", 0.0) > 0.6:
                 continue
             raw_segments.append({
@@ -102,9 +106,6 @@ def run_whisper_analysis(
         # 4. silence_sec 계산
         stt_segments = _calculate_silence(raw_segments)
 
-        # 5. DB 저장 (텍스트 기반 — 행 수 적어 DB 유지)
-        save_stt_segments(session_id, stt_segments)
-
         return {
             "stt_segments": stt_segments,
             "skipped":      False,
@@ -112,12 +113,10 @@ def run_whisper_analysis(
 
     except subprocess.TimeoutExpired:
         print(f"[Whisper] session_id={session_id} 타임아웃 — 음성 분석 생략")
-        save_stt_segments(session_id, [])   # 빈 값으로 저장
         return {"stt_segments": [], "skipped": True}
 
     except Exception as e:
         print(f"[Whisper] session_id={session_id} 오류: {e}")
-        save_stt_segments(session_id, [])
         return {"stt_segments": [], "skipped": True}
 
     finally:
