@@ -4,9 +4,9 @@ import torch
 import torch.nn as nn
 import timm
 
-# 실제 학습된 클래스 (neutral/confusion 없음 — CK+ 데이터셋 기준)
-TRAINED_CLASSES = ["neutral", "negative", "positive", "surprise"]  # v3: 4-class
-NUM_TRAINED     = len(TRAINED_CLASSES)   # 3
+# 실제 학습된 클래스 (emotion_model_v3.pth 기준 — 4-class)
+TRAINED_CLASSES = ["neutral", "negative", "positive", "surprise"]
+NUM_TRAINED     = len(TRAINED_CLASSES)   # 4
 
 # 프로젝트 전체 클래스 (추론 결과 매핑용)
 EMOTION_CLASSES = ["neutral", "negative", "positive", "confusion", "surprise"]

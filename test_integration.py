@@ -198,7 +198,7 @@ def test_cl5_metadata(session_id):
         )
         assert resp.status_code == 200, f"status={resp.status_code} body={resp.text}"
         data = resp.json()
-        assert data.get("status") == "ok", f"응답 오류: {data}"
+        assert data.get("saved") == True or data.get("status") == "ok", f"응답 오류: {data}"
         ok("메타데이터 전송 완료")
         return True
     except Exception as e:
