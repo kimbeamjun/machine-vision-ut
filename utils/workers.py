@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 # 루트 경로 설정
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(CURRENT_DIR)
+
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
@@ -16,15 +17,16 @@ from core.api_client import ApiClient
 
 class RecordingWorker(QThread):
     """UI 멈춤 방지를 위해 녹화를 백그라운드에서 실행하는 스레드"""
-    def __init__(self, recorder: ScreenRecorder, region: dict, output_path: str):
+    def __init__(self, recorder: ScreenRecorder, pixel_region: dict, output_path: str):
         super().__init__()
         self.recorder = recorder
-        self.region = region
+        self.pixel_region = pixel_region # 보정된 물리 픽셀 데이터
         self.output_path = output_path
 
     def run(self):
-        # 모든 좌표는 비율(0.0~1.0)로 전달 — recorder 내부에서 픽셀 변환
-        self.recorder.start(self.region, self.output_path)
+        # 보정된 픽셀 좌표를 recorder에 그대로 전달
+        self.recorder.start(self.pixel_region, self.output_path)
+        
 
 
 class UploadWorker(QThread):
@@ -85,9 +87,8 @@ class UploadWorker(QThread):
 
 class CalibrationWorker(QThread):
     """
-    [PDF 명세 CL-2~CL-4]
     5개 포인트 영상을 순차 업로드한 뒤 CL-4 (/calibrate/start) 를 호출한다.
-    CL-4는 동기 처리(최대 120초)이므로 응답 자체에 최종 결과가 담긴다 — 별도 폴링 불필요.
+    동기 처리(최대 120초)이므로 응답 자체에 최종 결과가 담긴다.
     """
     finished = Signal(bool, str)          # 업로드/시스템 오류 시 사용 (success=False)
     progress = Signal(str)
@@ -112,7 +113,7 @@ class CalibrationWorker(QThread):
 
                 self.progress.emit(f"포인트 {p_no} Presigned URL 요청 중...")
 
-                # [CL-2] Presigned URL 발급
+                # Presigned URL 발급
                 url_res = self.api.request_presigned_url(
                     file_type="calibration",
                     point_no=p_no,
@@ -125,19 +126,19 @@ class CalibrationWorker(QThread):
                     self.finished.emit(False, f"포인트 {p_no}: Presigned URL 발급 실패")
                     return
 
-                # [CL-3] 영상 업로드
+                # 영상 업로드
                 self.progress.emit(f"포인트 {p_no} 영상 업로드 중...")
                 if not self.api.upload_file(presigned_url, pt['path']):
                     self.finished.emit(False, f"포인트 {p_no} 영상 업로드 실패")
                     return
 
-            # [CL-4] 분석 시작 요청 — 동기 대기 (최대 120초, 타임아웃 150초)
+            # 분석 시작 요청 — 동기 대기 (최대 120초, 타임아웃 150초)
             self.progress.emit("AI 캘리브레이션 분석 중... (최대 120초 소요)")
             result = self.api.register_calibration(self.points_to_upload)
             status = result.get("status", "error")
 
             if status == "success":
-                # failed_points가 1개 이하면 서버가 success로 처리 (명세 MS-3 참고)
+                # failed_points가 1개 이하면 서버가 success로 처리
                 self.calibration_done.emit(result)
             elif status == "failed":
                 # failed_points >= 2 → 재촬영 필요
@@ -220,7 +221,7 @@ class AnalysisStatusWorker(QThread):
                     break
                 # status == "generating" → 계속 폴링
 
-                time.sleep(2)  # 명세서 권장 폴링 간격: 1~2초
+                time.sleep(2)  # 폴링 간격: 1~2초
             except Exception as e:
                 print(f"리포트 상태 체크 중 오류: {e}")
                 time.sleep(5)
@@ -243,8 +244,8 @@ class ScreenshotUploadWorker(QThread):
 
     def run(self):
         try:
-            # [CL-6 변형] file_type="screenshot" 으로 Presigned URL 발급
-            # [FIX] api_client의 file_type 하드코딩 버그 수정 후 정상 동작
+            # file_type="screenshot" 으로 Presigned URL 발급
+            # api_client의 file_type 하드코딩 버그 수정 후 정상 동작
             url_data = self.api.request_presigned_url(file_type="screenshot")
             presigned_url = url_data.get("presigned_url")
             object_key = url_data.get("object_key", "")
@@ -253,7 +254,7 @@ class ScreenshotUploadWorker(QThread):
                 self.finished.emit(False, "Presigned URL 발급 실패", self.log_id)
                 return
 
-            # [FIX] raw requests → api.upload_bytes() 사용 (localhost 치환 포함)
+            # raw requests → api.upload_bytes() 사용 (localhost 치환 포함)
             success = self.api.upload_bytes(presigned_url, self.image_data, content_type="image/png")
 
             if success:

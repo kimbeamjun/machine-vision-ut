@@ -7,6 +7,9 @@ from typing import Any, Dict, List, cast, Optional
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
 
+CONFIG_DIR = os.path.join(ROOT_DIR, "config")
+TASKS_CONFIG_PATH = os.path.join(CONFIG_DIR, "tasks_config.json")
+
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
@@ -246,20 +249,34 @@ class MainWindow(QMainWindow):
         self.selector.show()
 
     def _on_region_captured(self, rect) -> None:
-        """오버레이에서 선택된 사각형 좌표를 state에 반영 (비율로 변환)"""
-        geo = QApplication.primaryScreen().geometry()
+        """오버레이에서 선택된 사각형 좌표를 state에 반영 및 물리 픽셀 계산"""
+        # 1. 현재 앱이 실행 중인 화면의 정보 획득
+        screen = QGuiApplication.primaryScreen()
+        geo = screen.geometry()
+        dpr = screen.devicePixelRatio()  # DPI 배율 (예: 1.5, 2.0)
+
+        # 2. 비율 좌표 저장 (서버 전송용 0.0 ~ 1.0)
         self.state.viewport_region.x = rect.x() / geo.width()
         self.state.viewport_region.y = rect.y() / geo.height()
         self.state.viewport_region.w = rect.width() / geo.width()
         self.state.viewport_region.h = rect.height() / geo.height()
-        # viewport dict도 동기화
+        
+        # mss 녹화 엔진을 위한 실제 물리 픽셀 좌표 계산
+        # Qt의 rect는 논리 좌표이므로 dpr을 곱해야 실제 픽셀 값이 나옵니다.
+        self.pixel_region = {
+            "top": int(rect.y() * dpr),
+            "left": int(rect.x() * dpr),
+            "width": int(rect.width() * dpr),
+            "height": int(rect.height() * dpr)
+        }
+
         self.viewport = self.state.viewport_region.as_payload()
         self.region_preview.update()
         self._update_region_grid()
-        # 사이드바 좌표 텍스트를 갱신된 비율로 업데이트
+        
         vr = self.state.viewport_region
         self.coord_label.setText(
-            f"x:{vr.x:.2f} y:{vr.y:.2f} | w:{vr.w:.2f} h:{vr.h:.2f}"
+            f"x:{vr.x:.2f} y:{vr.y:.2f} | w:{vr.w:.2f} h:{vr.h:.2f} (DPR:{dpr:.1f})"
         )
 
     def _on_server_url_changed(self) -> None:
@@ -396,17 +413,17 @@ class MainWindow(QMainWindow):
                 print(f"[캘리브레이션] {msg}")
             )
         )
-        # 업로드/시스템 오류 (CL-2/CL-3 실패, 예외 등)
+        # 업로드/시스템 오류
         self.calib_worker.finished.connect(self.on_calibration_upload_done)
-        # [FIX] CL-4 동기 응답: 성공 → calibration_done, 실패 → calibration_failed (폴링 불필요)
+        # 성공 → calibration_done, 실패 → calibration_failed (폴링 불필요)
         self.calib_worker.calibration_done.connect(self.on_calibration_approved)
         self.calib_worker.calibration_failed.connect(self._on_calibration_failed)
         self.calib_worker.start()
 
     def on_calibration_upload_done(self, success: bool, message: str) -> None:
         """
-        [FIX] CalibrationWorker.finished는 이제 업로드 실패·시스템 오류 시에만 호출된다.
-        CL-4 분석 성공/실패는 calibration_done / calibration_failed 시그널이 담당.
+        CalibrationWorker.finished는 이제 업로드 실패·시스템 오류 시에만 호출된다.
+        분석 성공/실패는 calibration_done / calibration_failed 시그널이 담당.
         CalibrationStatusWorker 폴링은 PDF 명세에 없는 엔드포인트를 사용하므로 제거.
         """
         if not success:
@@ -423,7 +440,7 @@ class MainWindow(QMainWindow):
             self.p_bar.setValue(75)
 
     def on_calibration_approved(self, result_data: dict) -> None:
-        """CL-4 응답 status=success → 테스트 화면으로 이동"""
+        """status=success → 테스트 화면으로 이동"""
         self.p_bar.setValue(100)
         self.upload_status_label.setText("✅ 캘리브레이션 완료!")
         QMessageBox.information(self, "준비 완료", "AI 서버가 시선을 학습했습니다. 테스트를 시작합니다.")
@@ -489,7 +506,6 @@ class MainWindow(QMainWindow):
             self.task_layout.addSpacing(10)
             self.task_layout.addWidget(section_label("📋 테스트 시나리오"))
 
-            # [FIX] 하드코딩 제거 → tasks_config.json 또는 기본값 로드
             self.tasks = self._load_tasks_config()
             self.task_layout.addStretch()   # 태스크 버튼은 start_test()에서 동적 생성
             self._task_group_container = QWidget()
@@ -558,7 +574,7 @@ class MainWindow(QMainWindow):
             btn_fail = QPushButton("실패")
             btn_fail.setVisible(False)
 
-            # 상세 주석: 각 버튼에 람다를 연결하여 태스크 상태 제어
+            # 각 버튼에 람다를 연결하여 태스크 상태 제어
             btn_start.clicked.connect(
                 lambda chk, n=t_name, o=i, s=btn_start, ok=btn_success, no=btn_fail:
                 self._ui_start_task(n, o, s, ok, no)
@@ -635,12 +651,13 @@ class MainWindow(QMainWindow):
         self.test_running = True
         self.is_finalized = False
 
-        # [FIX] 테스트 시작마다 tasks_config.json을 다시 읽어 태스크 버튼 재생성
+        # 테스트 시작마다 tasks_config.json을 다시 읽어 태스크 버튼 재생성
         self.tasks = self._load_tasks_config()
         self._rebuild_task_buttons()
 
         self.video_output_path = os.path.abspath("test_video.mp4")
-        self.recording_thread = RecordingWorker(self.recorder, self.viewport, self.video_output_path)
+        region_to_use = getattr(self, "pixel_region", self.viewport)
+        self.recording_thread = RecordingWorker(self.recorder, region_to_use, self.video_output_path)
         self.recording_thread.start()
         self._load_test_url()
 
@@ -744,7 +761,7 @@ class MainWindow(QMainWindow):
 
     def _start_upload_process(self) -> None:
             """
-            [CL-REQ-31] 업로드 전용 경로: Presigned URL 발급 및 데이터 전송 시작
+            업로드 전용 경로: Presigned URL 발급 및 데이터 전송 시작
             """
             self.is_uploading = True
             self.p_bar.setValue(0)
@@ -812,18 +829,23 @@ class MainWindow(QMainWindow):
                 self._show_screen(2)
                 
     def _start_analysis_polling(self) -> None:
-        """분석 상태 감시 시작"""
+        """
+        분석 상태 감시 시작
+        [수정] status_updated 시그널을 _on_analysis_status_updated 메서드에 직접 연결하여 
+        상태별 분기 처리가 가능하도록 수정했습니다.
+        """
         from utils.workers import AnalysisStatusWorker
         
-        # 기존 워커가 있다면 정리
+        # 기존 워커가 있다면 안전하게 정리
         if self.analysis_status_worker and self.analysis_status_worker.isRunning():
             self.analysis_status_worker.stop()
             self.analysis_status_worker.wait()
 
         self.analysis_status_worker = AnalysisStatusWorker(self.api)
-        self.analysis_status_worker.status_updated.connect(
-            lambda s: self.upload_status_label.setText(f"🧐 AI 분석 중: {s}...")
-        )
+        
+        # 기존 람다 함수 대신 전용 핸들러 메서드에 직접 연결
+        self.analysis_status_worker.status_updated.connect(self._on_analysis_status_updated)
+        
         self.analysis_status_worker.analysis_finished.connect(self._on_analysis_complete)
         self.analysis_status_worker.start()
 
@@ -837,12 +859,30 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "분석 완료", "최종 리포트가 생성되었습니다.")
 
     def _on_analysis_status_updated(self, status: str) -> None:
-        if status == "generating":
-            self.p_bar.setValue(90)
-        elif status == "failed":
-            QMessageBox.critical(self, "분석 실패", "서버 분석 또는 보고서 생성에 실패했습니다.")
-            self._show_screen(4)
+        """
+        분석 상태 변경 시 호출되는 슬롯 (UI 갱신 및 에러 처리)
+        """
+        # 기본 상태 메시지 출력
+        self.upload_status_label.setText(f"🧐 AI 분석 중: {status}...")
+        print(f"[분석 상태] {status}")
 
+        if status == "generating":
+            # 보고서 생성 단계 진입 시 프로그레스 바 업데이트
+            self.p_bar.setValue(90)
+        
+        elif status == "failed":
+            # 분석 실패 시 사용자에게 알림을 표시하고 리소스 정리
+            if self.analysis_status_worker:
+                self.analysis_status_worker.stop()
+            
+            QMessageBox.critical(
+                self, 
+                "분석 실패", 
+                "서버 분석 또는 보고서 생성에 실패했습니다.\n잠시 후 다시 시도하거나 관리자에게 문의하세요."
+            )
+            # 실패 시 결과 화면(Index 4)으로 강제 이동시키거나 이전 단계로 복구
+            self._show_screen(4)
+            
     def _on_analysis_finished(self, result: Dict[str, Any]) -> None:
         self.p_bar.setValue(100)
         self.report_result = result
@@ -858,6 +898,29 @@ class MainWindow(QMainWindow):
             "start_time": time.time()  # duration 계산을 위한 실제 시간
         }
         print(f"🚀 태스크 시작: {task_name} (순서: {task_order})")
+    
+    def _load_tasks(self) -> None:
+        """
+        명시된 TASKS_CONFIG_PATH에서 파일을 읽어옵니다.
+        파일이 없을 경우 사용자에게 위치 안내를 제공합니다.
+        """
+        import json
+        if os.path.exists(TASKS_CONFIG_PATH):
+            try:
+                with open(TASKS_CONFIG_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.tasks = data.get("tasks", [])
+            except Exception as e:
+                print(f"설정 파일 읽기 오류: {e}")
+                self.tasks = ["기본 태스크 1"]
+        else:
+            # 파일이 없을 경우 가이드 출력 및 기본값 설정
+            print(f"경고: 설정 파일을 찾을 수 없습니다. 위치: {TASKS_CONFIG_PATH}")
+            QMessageBox.warning(
+                self, "설정 파일 누락",
+                f"태스크 설정 파일이 없습니다.\n다음 위치에 파일을 생성해주세요:\n{TASKS_CONFIG_PATH}"
+            )
+            self.tasks = ["기본 태스크 1"]
 
     def _finish_task(self, is_success: bool) -> None:
         """
@@ -909,7 +972,7 @@ class MainWindow(QMainWindow):
             # 2. 메인 스크린의 전체 화면을 QPixmap 형태로 캡처(Grab)
             pixmap = screen.grabWindow(0)
             
-            # 3. 디스크에 임시 PNG 파일을 쓰지 않기 위해 PySide6의 메모리 버퍼 시스템을 활용합니다.
+            # 3. 디스크에 임시 PNG 파일을 쓰지 않기 위해 PySide6의 메모리 버퍼 시스템을 활용
             byte_array = QByteArray()                # 바이너리 데이터를 담을 바이트 배열 생성
             buffer = QBuffer(byte_array)             # 바이트 배열을 버퍼 장치에 연결
             buffer.open(QIODevice.OpenModeFlag.WriteOnly) # 쓰기 전용 모드로 버퍼를 오픈

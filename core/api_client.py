@@ -6,8 +6,8 @@ import requests
 
 @dataclass(frozen=True)
 class ApiConfig:
-    """HTTP API 연결 설정[cite: 4]."""
-    base_url: str = "http://10.10.10.113:8000" # 메인서버 포트 [cite: 4]
+    """HTTP API 연결 설정."""
+    base_url: str = "http://10.10.10.113:8000" # 메인서버 포트
     timeout_sec: float = 30.0
     minio_url: str = "http://10.10.10.113:9000"
 
@@ -50,7 +50,7 @@ class ApiClient:
             raise ValueError("session_id가 없습니다.")
 
         if file_type == "calibration":
-            # 인자가 None일 경우 kwargs에서 'x', 'y'라도 찾아서 할당 (필살기)
+            # 인자가 None일 경우 kwargs에서 'x', 'y'라도 찾아서 할당
             s_x = screen_x if screen_x is not None else kwargs.get('x', 0.0)
             s_y = screen_y if screen_y is not None else kwargs.get('y', 0.0)
             p_no = point_no if point_no is not None else 1
@@ -63,13 +63,13 @@ class ApiClient:
             path = f"/api/v1/sessions/{self.session_id}/calibrate/presigned-url"
             return self._post(path, payload)
         else:
-            # [FIX] file_type 파라미터를 그대로 전달 (이전에 "recording" 하드코딩 → 스크린샷 URL 오발급 버그)
+            # file_type 파라미터를 그대로 전달
             path = f"/api/v1/sessions/{self.session_id}/presigned-url"
             return self._post(path, {"file_type": file_type})
         
     def upload_file(self, presigned_url: str, file_path: str) -> bool:
         """
-        CL-3 / CL-7: MinIO 파일 직접 업로드 [cite: 53, 104]
+        MinIO 파일 직접 업로드
         SignatureDoesNotMatch 에러 해결을 위해 호스트 헤더를 고정하거나 
         서버 설정에 맞게 URL을 처리합니다.
         """
@@ -80,7 +80,7 @@ class ApiClient:
                 presigned_url = presigned_url.replace("localhost", "10.10.10.113")
 
             with open(file_path, "rb") as file:
-                # 2. PUT 요청 시 Content-Type을 명세서대로 지정 [cite: 57, 108]
+                # 2. PUT 요청 시 Content-Type을 명세서대로 지정
                 # 서버에서 서명을 만들 때 Content-Type을 포함했다면 여기서 일치해야 합니다.
                 headers = {
                     'Content-Type': 'video/mp4' 
@@ -108,7 +108,7 @@ class ApiClient:
 
     def register_calibration(self, calibration_points: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        CL-4: 캘리브레이션 분석 시작 요청 (동기 대기).
+        캘리브레이션 분석 시작 요청 (동기 대기).
         PDF 명세상 서버가 AI 큐B 결과를 받을 때까지 대기 후 응답반환.
         최대 120초 소요 → 타임아웃 150초로 설정.
         응답: {"status": "success"} | {"status": "failed", "failed_points": [...]} | {"status": "error"}
@@ -116,10 +116,10 @@ class ApiClient:
         if not self.session_id:
             raise ValueError("session_id가 없습니다.")
 
-        # [FIX] CL-4는 동기 처리(최대 120초) → _post의 30초 타임아웃을 우회, 150초로 직접 호출
+        # 동기 처리(최대 120초) → _post의 30초 타임아웃을 우회, 150초로 직접 호출
         response = requests.post(
             self._url(f"/api/v1/sessions/{self.session_id}/calibrate/start"),
-            json={},           # CL-4 요청 body 없음 (서버가 DB에서 calibration_points 조회)
+            json={},           # 요청 body 없음 (서버가 DB에서 calibration_points 조회)
             timeout=150.0,
         )
         response.raise_for_status()
@@ -141,7 +141,7 @@ class ApiClient:
         page_logs: List[Dict[str, Any]],
         task_results: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """CL-5: 테스트 메타데이터 전송[cite: 34, 80, 81]."""
+        """테스트 메타데이터 전송"""
         if not self.session_id:
             raise ValueError("session_id가 없습니다.")
 
@@ -154,13 +154,13 @@ class ApiClient:
         )
 
     def start_analysis(self) -> Dict[str, Any]:
-        """CL-8: 본분석 시작 요청[cite: 34, 111, 112]."""
+        """본분석 시작 요청"""
         if self.session_id is None:
             raise ValueError("session_id가 없습니다.")
         return self._post(f"/api/v1/sessions/{self.session_id}/analyze", {})
 
     def get_report_status(self) -> Dict[str, Any]:
-        """최종 리포트 생성 상태 확인[cite: 23, 176]."""
+        """최종 리포트 생성 상태 확인"""
         if not self.session_id:
             raise ValueError("session_id가 없습니다.")
 

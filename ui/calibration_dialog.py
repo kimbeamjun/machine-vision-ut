@@ -7,12 +7,12 @@ from PySide6.QtGui import QPainter, QColor
 
 class CalibrationDialog(QDialog):
     """
-    [명세 v5 반영] 5개 포인트 촬영 및 데이터 수집 담당.
+    5개 포인트 촬영 및 데이터 수집 담당.
     모든 데이터 키값을 'screen_x', 'screen_y'로 통일하여 KeyError를 방지합니다.
     """
     calibration_finished = Signal(list)
 
-    # 기본 5점 레이아웃 (명세서 v5 기준 좌표 및 필드명 통일)
+    # 기본 5점 레이아웃
     _DEFAULT_POINTS = [
         {"point_no": 1, "screen_x": 0.1, "screen_y": 0.1},
         {"point_no": 2, "screen_x": 0.9, "screen_y": 0.1},
@@ -74,7 +74,7 @@ class CalibrationDialog(QDialog):
             # 녹화 파일 생성 (640x480, 20fps)
             self.out = cv2.VideoWriter(save_path, self.fourcc, 20.0, (640, 480))
 
-            # [CL-2/CL-3] 수집 데이터 리스트에 추가 (KeyError 방지를 위해 screen_x 필드명 고정)
+            # 수집 데이터 리스트에 추가 (KeyError 방지를 위해 screen_x 필드명 고정)
             self.captured_data.append({
                 "point_no": point['point_no'],
                 "screen_x": point['screen_x'], 
@@ -117,7 +117,7 @@ class CalibrationDialog(QDialog):
             
             target = self.points[self.current_index]
             
-            # [수정] 'x' 대신 'screen_x'를 참조하여 에러 방지
+            # 'x' 대신 'screen_x'를 참조하여 에러 방지
             px = target['screen_x'] * self.width()
             py = target['screen_y'] * self.height()
             
