@@ -1,7 +1,7 @@
 # tasks.py
 import asyncio
 from background_tasks.celery_app import app
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.dialects.mysql import insert
 from app_settings.db_connection import DATABASE_URL
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
@@ -69,6 +69,10 @@ async def _process_analysis_result_async(payload):
             return
 
         try:
+            # 중복 키 에러(IntegrityError) 방지: 재시도 등으로 이미 데이터가 있을 경우 기존 데이터 삭제
+            await db.execute(delete(SttSegmentModel).where(SttSegmentModel.session_id == session_id))
+            await db.execute(delete(PageSummaryModel).where(PageSummaryModel.session_id == session_id))
+            
             if not skipped_stt:
                 for stt in stt_segments:
                     db.add(SttSegmentModel(
@@ -123,9 +127,22 @@ async def _process_analysis_result_async(payload):
                 try:
                     llm_text = await generate_ut_report_llm(task_results_orm, page_summaries_orm, stt_segments_orm)
                     report.llm_text = llm_text
+                    
+                    # PDF 생성 및 업로드
+                    from background_tasks.pdf_service import generate_and_upload_pdf
+                    import asyncio
+                    
+                    pdf_path = await asyncio.to_thread(
+                        generate_and_upload_pdf,
+                        session_id,
+                        llm_text,
+                        page_summaries_orm
+                    )
+                    
+                    report.pdf_path = pdf_path
                     report.status = "done"
                     await db.commit()
-                    print(f"✅ [SUCCESS] Session {session_id}: LLM 리포트 생성 및 DB 저장 완료")
+                    print(f"✅ [SUCCESS] Session {session_id}: LLM 리포트 및 PDF 생성 완료")
                 except Exception as llm_e:
                     print(f"[CELERY] [ERROR] LLM Report generation failed: {llm_e}")
                     report.status = "failed"

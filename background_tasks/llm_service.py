@@ -66,7 +66,7 @@ async def generate_ut_report_llm(task_results: list, page_summaries: list, stt_s
                     {"role": "user", "content": prompt}
                 ],
                 temperature=1,
-                max_tokens=8192,
+                max_tokens=4000,
                 top_p=1,
                 stream=True
             )
