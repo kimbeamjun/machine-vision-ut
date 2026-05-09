@@ -20,6 +20,9 @@ main_server/
 │   └── db_orm_models.py    # Session, PageLog, Report 등의 테이블 정의
 ├── api_data_formats/       # Pydantic을 이용한 요청/응답 검증(Schema) 스크립트
 ├── app_settings/           # 데이터베이스 연결(DB Connection) 및 MinIO 초기 설정
+├── background_tasks/       # 비동기 백그라운드 작업 (Celery & Redis)
+│   ├── celery_app.py       # Celery 앱 인스턴스 및 라우팅 설정
+│   └── tasks.py            # AI 분석 결과 수신 및 DB 저장 태스크
 └── requirements.txt        # 파이썬 패키지 의존성
 ```
 
@@ -69,9 +72,14 @@ uvicorn main_server_app:app --host 0.0.0.0 --port 8000 --reload
 서버가 정상적으로 실행되면 `http://localhost:8000/docs` 에 접속하여 Swagger UI를 통해 모든 API를 테스트해 볼 수 있습니다.
 
 
+### 4. Celery 워커 실행 (백그라운드 작업 처리용)
+Redis 서버가 실행 중이어야 합니다. 가상환경이 활성화된 새 터미널 창에서 다음 명령어를 실행하여 워커를 켭니다.
+```bash
+celery -A background_tasks.celery_app worker -Q main_tasks -l info
+```
 
 -----------
 
-현재 구현된 기능 : MinIO - 메인서버 - db 연결
+현재 구현된 기능 : MinIO - 메인서버 - DB 연결, Redis/Celery 큐 연동 및 결과 처리
 
-구현 예정 : Redis, Celery, LLM, PDF 관련 기능
+구현 예정 : LLM 요약, PDF 생성 기능

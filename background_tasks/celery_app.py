@@ -8,7 +8,7 @@ app = Celery(
     'my_task_system',
     broker=REDIS_URL,
     backend=REDIS_URL,
-    include=['tasks'] # 실행할 작업이 정의된 파일 이름(tasks.py)
+    include=['background_tasks.tasks'] # 실행할 작업이 정의된 파일 이름(background_tasks/tasks.py)
 )
 
 # 신뢰성 및 최적화 설정

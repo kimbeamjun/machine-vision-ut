@@ -1,6 +1,6 @@
 # tasks.py
 import asyncio
-from celery_app import app
+from background_tasks.celery_app import app
 from sqlalchemy import select
 from sqlalchemy.dialects.mysql import insert
 from app_settings.db_connection import DATABASE_URL
@@ -11,7 +11,7 @@ from sqlalchemy.pool import NullPool
 celery_engine = create_async_engine(DATABASE_URL, poolclass=NullPool)
 CeleryAsyncSessionLocal = async_sessionmaker(bind=celery_engine, expire_on_commit=False)
 
-from database_tables.db_orm_models import SessionModel, CalibrationModel, PageSummaryModel, SttSegmentModel, ReportModel
+from database_tables.db_orm_models import SessionModel, CalibrationModel, PageSummaryModel, SttSegmentModel, ReportModel, TaskResultModel
 
 async def _process_calibration_result_async(payload):
     session_id = payload.get("session_id")
@@ -47,7 +47,7 @@ async def _process_calibration_result_async(payload):
         await db.commit()
         print(f"✅ [SUCCESS] Session {session_id}: 캘리브레이션 결과 DB 저장 완료 (status: {session.status})")
 
-@app.task(bind=True)
+@app.task(bind=True, name="tasks.process_calibration_result")
 def process_calibration_result(self, payload):
     print(f"[CELERY] [START] process_calibration_result for session_id={payload.get('session_id')}")
     asyncio.run(_process_calibration_result_async(payload))
@@ -98,10 +98,37 @@ async def _process_analysis_result_async(payload):
                 ))
 
             session.status = "done"
-            
-            # TODO: MS-5 (LLM API) and MS-6 (PDF) can be triggered here or as another Celery task
-            
             await db.commit()
+            print(f"✅ [SUCCESS] Session {session_id}: 본 분석 결과(페이지, STT) DB 저장 완료 (status: {session.status})")
+            
+            # ----------------------------------------------------
+            # LLM 분석 및 텍스트 리포트 생성 로직
+            # ----------------------------------------------------
+            from background_tasks.llm_service import generate_ut_report_llm
+            res_tasks = await db.execute(select(TaskResultModel).where(TaskResultModel.session_id == session_id))
+            task_results_orm = res_tasks.scalars().all()
+            
+            res_pages = await db.execute(select(PageSummaryModel).where(PageSummaryModel.session_id == session_id))
+            page_summaries_orm = res_pages.scalars().all()
+            
+            res_stt = await db.execute(select(SttSegmentModel).where(SttSegmentModel.session_id == session_id))
+            stt_segments_orm = res_stt.scalars().all()
+            
+            res_rep = await db.execute(select(ReportModel).where(ReportModel.session_id == session_id))
+            report = res_rep.scalar_one_or_none()
+            
+            if report:
+                try:
+                    llm_text = await generate_ut_report_llm(task_results_orm, page_summaries_orm, stt_segments_orm)
+                    report.llm_text = llm_text
+                    report.status = "done"
+                    await db.commit()
+                    print(f"✅ [SUCCESS] Session {session_id}: LLM 리포트 생성 및 DB 저장 완료")
+                except Exception as llm_e:
+                    print(f"[CELERY] [ERROR] LLM Report generation failed: {llm_e}")
+                    report.status = "failed"
+                    await db.commit()
+                    
         except Exception as e:
             await db.rollback()
             session.status = "failed"
@@ -112,7 +139,7 @@ async def _process_analysis_result_async(payload):
             await db.commit()
             print(f"[CELERY] [ERROR] process_analysis_result failed: {e}")
 
-@app.task(bind=True)
+@app.task(bind=True, name="tasks.process_analysis_result")
 def process_analysis_result(self, payload):
     print(f"[CELERY] [START] process_analysis_result for session_id={payload.get('session_id')}")
     asyncio.run(_process_analysis_result_async(payload))

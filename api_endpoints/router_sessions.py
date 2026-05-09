@@ -10,7 +10,7 @@ from app_settings.db_connection import get_db
 from database_tables.db_orm_models import SessionModel, CalibrationModel, PageLogModel, TaskResultModel, ReportModel, CalibrationPointModel
 from api_data_formats.api_request_schemas import SessionCreateReq, PresignedUrlReq, CalibPresignedUrlReq, MetadataReq
 from app_settings.storage_minio import minio_client, BUCKET_NAME
-from celery_app import app as celery_app
+from background_tasks.celery_app import app as celery_app
 import asyncio
 
 router = APIRouter(prefix="/sessions", tags=["Sessions"])
@@ -173,8 +173,7 @@ async def analyze_session(id: int, db: AsyncSession = Depends(get_db)):
     if not session:
         raise HTTPException(status_code=404, detail="해당 session_id를 찾을 수 없습니다.")
         
-    # 데이터 조회
-    # (실제로는 calibrations, page_logs, task_results 모두 조회해서 kwargs로 넘겨야 하지만 간단히 축약)
+    # 데이터 조회 (DB에서 수집된 모든 메타데이터를 끌어모음)
     calib_res = await db.execute(select(CalibrationModel).where(CalibrationModel.session_id == id))
     calibrations = [{"point_no": c.point_no, "screen_x": c.screen_x, "screen_y": c.screen_y, "gaze_x": c.gaze_x, "gaze_y": c.gaze_y} for c in calib_res.scalars().all()]
     
