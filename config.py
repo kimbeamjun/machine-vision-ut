@@ -7,28 +7,28 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── Redis ────────────────────────────────────────────────────────
-# 큐A: 메인 서버 Redis (Celery Broker — 태스크 수신)
+# 큐A: 메인 서버 Redis (Celery Broker — 태스크 수신 + 결과 송신)
 REDIS_HOST_A     = os.getenv("REDIS_HOST_A",     "10.10.10.113")
 REDIS_PORT_A     = int(os.getenv("REDIS_PORT_A", "6379"))
 REDIS_PASSWORD_A = os.getenv("REDIS_PASSWORD_A", "1234")
-
-# 큐B: AI 서버 로컬 Redis (분석 결과 메인 서버로 송신)
-REDIS_HOST       = os.getenv("REDIS_HOST_B",     "10.10.10.128")
-REDIS_PORT_B     = int(os.getenv("REDIS_PORT_B", "6380"))
-REDIS_PASSWORD_B = os.getenv("REDIS_PASSWORD_B", "")  # 비밀번호 없으면 빈 문자열
 
 # ── MinIO ────────────────────────────────────────────────────────
 MINIO_ENDPOINT  = os.getenv("MINIO_ENDPOINT",   "10.10.10.113:9000")
 MINIO_ACCESS    = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET    = os.getenv("MINIO_SECRET_KEY", "minioadmin")
-MINIO_BUCKET    = os.getenv("MINIO_BUCKET",     "udt")
+MINIO_BUCKET    = os.getenv("MINIO_BUCKET",     "ut-platform")
 MINIO_SECURE    = False
 
 # ── Celery ───────────────────────────────────────────────────────
-# 비밀번호 있으면 :password@ 형태로 URL에 포함
-_broker_auth = f":{REDIS_PASSWORD_A}@" if REDIS_PASSWORD_A else ""
+# AI 서버 수신용 Broker (큐A — 메인서버가 태스크 적재)
+_broker_auth   = f":{REDIS_PASSWORD_A}@" if REDIS_PASSWORD_A else ""
 CELERY_BROKER  = f"redis://{_broker_auth}{REDIS_HOST_A}:{REDIS_PORT_A}/0"
 CELERY_BACKEND = f"redis://{_broker_auth}{REDIS_HOST_A}:{REDIS_PORT_A}/1"
+
+# 메인서버 송신용 Broker (결과 send_task 전달 — 큐A 동일 Broker 사용)
+# AI-7: tasks.process_calibration_result
+# AI-8: tasks.process_analysis_result
+MAIN_SERVER_BROKER = CELERY_BROKER
 
 # ── 모델 경로 ────────────────────────────────────────────────────
 MODEL_DIR           = os.getenv("MODEL_DIR", "/home/llm-server/Desktop/beomjun/machine-vision-ut/models/weights")

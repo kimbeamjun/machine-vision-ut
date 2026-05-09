@@ -1,9 +1,16 @@
 # celery_app.py
-# AI 서버 Celery Worker — 명세서 v5 (PDF) 기준 최종본
+# AI 서버 Celery Worker — 명세서 v6 기준 최종본
 #
-# AI-7: 큐B 송신 — 캘리브레이션 분석 결과 (calibrations 배열 포함)
-# AI-8: 큐B 송신 — 본 분석 결과 (stt_segments + page_summaries)
+# AI-7: 메인서버 Celery Worker에 캘리브레이션 분석 결과 전달
+# AI-8: 메인서버 Celery Worker에 본 분석 결과 전달
 # DB 접근 없음. MinIO 파일 삭제 없음. 로컬 임시파일만 삭제.
+#
+# [v5 → v6 변경사항]
+# - 결과 전달 방식 변경: Redis RPUSH(큐B 직접 적재) → Celery send_task (메인서버 Worker 직접 호출)
+# - 제거: redis import, _redis_b 인스턴스, _push_result_to_queue_b() 함수
+#         config에서 REDIS_HOST / REDIS_PORT_B / REDIS_PASSWORD_B import
+# - 추가: main_app (메인서버 브로커를 향하는 Celery 인스턴스)
+#         _send_to_main() 내부 헬퍼 함수
 
 import os
 import sys
@@ -14,20 +21,19 @@ _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-import json
 import tempfile
 import traceback
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import redis
 from celery import Celery
 
 from config import (
     CELERY_BROKER, CELERY_BACKEND,
-    REDIS_HOST, REDIS_PORT_B, REDIS_PASSWORD_B,
+    REDIS_HOST_A, REDIS_PORT_A, REDIS_PASSWORD_A,  # 메인서버 브로커용
 )
 from minio_client import download_video, download_calibration_video
 
+# ── AI 서버 자신의 Celery 앱 (큐A 태스크 수신용) ─────────────────
 app = Celery("ai_server", broker=CELERY_BROKER, backend=CELERY_BACKEND)
 app.conf.update(
     task_serializer="json",
@@ -37,23 +43,32 @@ app.conf.update(
     worker_prefetch_multiplier=1,
     task_reject_on_worker_lost=True,
     task_routes={
-        "celery_app.analyze_calibration": {"queue": "ai_queue"},
-        "celery_app.analyze_session":     {"queue": "ai_queue"},
+        "celery_app.analyze_calibration": {"queue": "ai_tasks"},
+        "celery_app.analyze_session":     {"queue": "ai_tasks"},
     },
 )
 
-_redis_b = redis.Redis(
-    host=REDIS_HOST,
-    port=REDIS_PORT_B,
-    password=REDIS_PASSWORD_B if REDIS_PASSWORD_B else None,
-    db=0,
-    decode_responses=False,
-)
+# ── 메인서버 브로커를 향하는 Celery 앱 (결과 전달용) ─────────────
+# v6: AI 서버가 분석 완료 후 메인서버 Worker 태스크를 직접 send_task로 호출
+_main_broker_auth = f":{REDIS_PASSWORD_A}@" if REDIS_PASSWORD_A else ""
+_main_broker_url  = f"redis://{_main_broker_auth}{REDIS_HOST_A}:{REDIS_PORT_A}/0"
+main_app = Celery("main_caller", broker=_main_broker_url)
 
 
-def _push_result_to_queue_b(payload: dict):
-    """큐B(result_queue)에 JSON 페이로드 적재"""
-    _redis_b.rpush("result_queue", json.dumps(payload, ensure_ascii=False))
+def _send_to_main(task_name: str, payload: dict):
+    """
+    메인서버 Celery Worker에 태스크를 전달하는 헬퍼 함수.
+
+    v6 명세서 AI-7 / AI-8 호출 규격:
+        task_name : "tasks.process_calibration_result"
+                  | "tasks.process_analysis_result"
+        payload   : 명세서의 kwargs["payload"] 딕셔너리
+    """
+    main_app.send_task(
+        task_name,
+        kwargs={"payload": payload},
+        queue="main_tasks",
+    )
 
 
 # ── ProcessPoolExecutor 래퍼 함수 ────────────────────────────────
@@ -96,7 +111,7 @@ def _run_whisper(args):
     name="celery_app.analyze_calibration",
     bind=True,
     max_retries=0,
-    queue="ai_queue",
+    queue="ai_tasks",
     acks_late=True,
 )
 def analyze_calibration(self, session_id: int, calibration_points: list[dict]):
@@ -115,11 +130,12 @@ def analyze_calibration(self, session_id: int, calibration_points: list[dict]):
                 }, ... (총 5개)
             ]
 
-    큐B 페이로드 (AI-7):
-        성공: {type, session_id, success=true, failed_points, calibrations}
-        오류: {type, session_id, success=false, error}
+    결과 전달 (AI-7):
+        → main_app.send_task("tasks.process_calibration_result", kwargs={"payload": {...}})
+        성공: payload = {type, session_id, success=true, failed_points, calibrations}
+        오류: payload = {type, session_id, success=false, error}
 
-    ※ 큐B 적재 완료 후 로컬 임시파일 삭제. MinIO 파일 건드리지 않음.
+    ※ 전달 완료 후 로컬 임시파일 삭제. MinIO 파일 건드리지 않음.
     """
     print(f"[AI-7] session_id={session_id} 캘리브레이션 분석 시작")
 
@@ -150,15 +166,18 @@ def analyze_calibration(self, session_id: int, calibration_points: list[dict]):
 
         result = run_calibration_analysis(session_id, calibration_videos)
 
-        # AI-7: 큐B 적재 — calibrations 배열 포함 (성공한 포인트만)
-        # 메인 서버(MS-3)가 수신 후 calibrations 테이블 INSERT
-        _push_result_to_queue_b({
-            "type":          "calibration_result",
-            "session_id":    session_id,
-            "success":       result["success"],
-            "failed_points": result["failed_points"],
-            "calibrations":  result["calibrations"],
-        })
+        # AI-7: 메인서버 Celery Worker에 결과 전달 (v6: send_task 방식)
+        # 메인 서버(MS-3 tasks.process_calibration_result)가 수신 후 calibrations 테이블 INSERT
+        _send_to_main(
+            "tasks.process_calibration_result",
+            {
+                "type":          "calibration_result",
+                "session_id":    session_id,
+                "success":       result["success"],
+                "failed_points": result["failed_points"],
+                "calibrations":  result["calibrations"],
+            },
+        )
 
         print(f"[AI-7] session_id={session_id} 완료 "
               f"(실패 포인트: {result['failed_points']})")
@@ -166,12 +185,16 @@ def analyze_calibration(self, session_id: int, calibration_points: list[dict]):
     except Exception as e:
         print(f"[AI-7] session_id={session_id} 오류: {e}")
         traceback.print_exc()
-        _push_result_to_queue_b({
-            "type":       "calibration_result",
-            "session_id": session_id,
-            "success":    False,
-            "error":      str(e),
-        })
+        # AI 오류 시에도 메인서버에 실패 결과 전달
+        _send_to_main(
+            "tasks.process_calibration_result",
+            {
+                "type":       "calibration_result",
+                "session_id": session_id,
+                "success":    False,
+                "error":      str(e),
+            },
+        )
 
     finally:
         # 로컬 임시파일 삭제 (MinIO 파일 건드리지 않음)
@@ -188,7 +211,7 @@ def analyze_calibration(self, session_id: int, calibration_points: list[dict]):
     name="celery_app.analyze_session",
     bind=True,
     max_retries=0,
-    queue="ai_queue",
+    queue="ai_tasks",
     acks_late=True,
 )
 def analyze_session(
@@ -215,11 +238,12 @@ def analyze_session(
         task_results    : [{"task_order","result","duration_sec"}, ...]
                           result 값: "success" | "fail"
 
-    큐B 페이로드 (AI-8):
-        성공: {type, session_id, stt_segments, page_summaries, skipped_stt}
-        오류: {type, session_id, success=false, error}
+    결과 전달 (AI-8):
+        → main_app.send_task("tasks.process_analysis_result", kwargs={"payload": {...}})
+        성공: payload = {type, session_id, stt_segments, page_summaries, skipped_stt}
+        오류: payload = {type, session_id, success=false, error}
 
-    ※ 큐B 적재 완료 후 로컬 임시파일 삭제. MinIO 파일 건드리지 않음.
+    ※ 전달 완료 후 로컬 임시파일 삭제. MinIO 파일 건드리지 않음.
     """
     print(f"[AI-8] session_id={session_id} 본 분석 시작")
 
@@ -240,7 +264,7 @@ def analyze_session(
         gaze_result    = None
         whisper_result = None
 
-        with ProcessPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=3) as executor:
             future_emotion = executor.submit(
                 _run_emotion, (video_local_path, session_id)
             )
@@ -287,27 +311,34 @@ def analyze_session(
             gaze_detail_json_path=gaze_result["detail_json_path"],
         )
 
-        # AI-8: 큐B 적재
-        # 메인 서버(MS-4)가 수신 후 stt_segments + page_summaries DB 저장
-        _push_result_to_queue_b({
-            "type":           "analysis_result",
-            "session_id":     session_id,
-            "stt_segments":   whisper_result["stt_segments"],
-            "page_summaries": summaries,
-            "skipped_stt":    whisper_result.get("skipped", False),
-        })
-        print(f"[AI-8] session_id={session_id} 큐B 적재 완료")
+        # AI-8: 메인서버 Celery Worker에 결과 전달 (v6: send_task 방식)
+        # 메인 서버(MS-4 tasks.process_analysis_result)가 수신 후 stt_segments + page_summaries DB 저장
+        _send_to_main(
+            "tasks.process_analysis_result",
+            {
+                "type":           "analysis_result",
+                "session_id":     session_id,
+                "stt_segments":   whisper_result["stt_segments"],
+                "page_summaries": summaries,
+                "skipped_stt":    whisper_result.get("skipped", False),
+            },
+        )
+        print(f"[AI-8] session_id={session_id} 결과 전달 완료")
 
     except Exception as e:
         print(f"[AI-8] session_id={session_id} 오류: {e}")
         traceback.print_exc()
-        _push_result_to_queue_b({
-            "type":       "analysis_result",
-            "session_id": session_id,
-            "success":    False,
-            "error":      str(e),
-        })
-        raise self.reject(requeue=False)
+        # AI 오류 시에도 메인서버에 실패 결과 전달
+        _send_to_main(
+            "tasks.process_analysis_result",
+            {
+                "type":       "analysis_result",
+                "session_id": session_id,
+                "success":    False,
+                "error":      str(e),
+            },
+        )
+        raise
 
     finally:
         # 로컬 임시파일 삭제 (MinIO 파일 건드리지 않음)
