@@ -29,8 +29,10 @@ async def _process_calibration_result_async(payload):
             session.status = "error"
         elif len(failed_points) >= 2:
             session.status = "calib_failed"
+            session.failed_points = failed_points
         else:
             session.status = "calibrated"
+            session.failed_points = failed_points
             for calib in calibrations:
                 stmt = insert(CalibrationModel).values(
                     session_id=session_id,

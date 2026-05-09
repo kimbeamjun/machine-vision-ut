@@ -118,7 +118,8 @@ async def start_calibration(id: int, db: AsyncSession = Depends(get_db)):
     celery_app.send_task(
         "celery_app.analyze_calibration", 
         args=[id], 
-        kwargs={"calibration_points": points_list}
+        kwargs={"calibration_points": points_list},
+        queue="ai_tasks"
     )
     
     # 동기 대기 로직 (최대 5분 대기)
@@ -128,10 +129,11 @@ async def start_calibration(id: int, db: AsyncSession = Depends(get_db)):
         await db.commit()  # DB 트랜잭션을 갱신하여 최신 상태를 읽어올 수 있도록 함
         await db.refresh(session)
         if session.status == "calibrated":
+            if session.failed_points:
+                return {"status": "success", "failed_points": session.failed_points}
             return {"status": "success"}
         elif session.status == "calib_failed":
-            # 실제로는 failed_points를 돌려줘야 하나, 현재 모델에 필드가 없으므로 생략 또는 추가 쿼리 필요
-            return {"status": "failed", "failed_points": []} 
+            return {"status": "failed", "failed_points": session.failed_points or []} 
         elif session.status == "error":
             return {"status": "error"}
         await asyncio.sleep(1)
@@ -164,7 +166,7 @@ async def save_metadata(id: int, req: MetadataReq, db: AsyncSession = Depends(ge
         await db.rollback()
         raise HTTPException(status_code=500, detail=f"데이터 저장 중 오류 발생: {str(e)}")
         
-    return {"saved": True, "page_logs": len(req.page_logs), "task_results": len(req.task_results)}
+    return {"status": "success", "page_logs": len(req.page_logs), "task_results": len(req.task_results)}
 
 @router.post("/{id}/analyze", status_code=status.HTTP_202_ACCEPTED)
 async def analyze_session(id: int, db: AsyncSession = Depends(get_db)):
@@ -194,7 +196,8 @@ async def analyze_session(id: int, db: AsyncSession = Depends(get_db)):
     celery_app.send_task(
         "celery_app.analyze_session", 
         args=[id], 
-        kwargs=kwargs
+        kwargs=kwargs,
+        queue="ai_tasks"
     )
     session.status = "analyzing"
     

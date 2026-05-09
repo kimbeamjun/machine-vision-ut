@@ -8,6 +8,7 @@ class SessionModel(Base):
     video_path = Column(String(500), nullable=True)
     viewport_region = Column(JSON, nullable=True)
     status = Column(String(20), nullable=False, default="uploaded")
+    failed_points = Column(JSON, nullable=True)
     created_at = Column(DateTime, nullable=False, default=func.now())
     updated_at = Column(DateTime, nullable=True, onupdate=func.now())
 
@@ -35,6 +36,7 @@ class CalibrationPointModel(Base):
 
 class CalibrationModel(Base):
     __tablename__ = "calibrations"
+    __table_args__ = (UniqueConstraint("session_id", "point_no", name="uq_calibrations"),)
     id = Column(Integer, primary_key=True, autoincrement=True)
     session_id = Column(Integer, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
     point_no = Column(Integer, nullable=False)
