@@ -13,9 +13,7 @@ TASKS_CONFIG_PATH = os.path.join(CONFIG_DIR, "tasks_config.json")
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from PySide6.QtMultimedia import QCamera, QMediaCaptureSession, QImageCapture
-from PySide6.QtMultimediaWidgets import QVideoWidget    
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QGuiApplication, QPixmap, QImage
 from PySide6.QtCore import Qt, QThreadPool, Slot, QTimer, QUrl, QByteArray, QBuffer, QIODevice, QPoint
 from PySide6.QtWidgets import (
     QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -45,7 +43,8 @@ from core.recorder import ScreenRecorder
 from ui.calibration_dialog import CalibrationDialog
 from utils.workers import (
     RecordingWorker, UploadWorker, CalibrationWorker,
-    CalibrationStatusWorker, AnalysisStatusWorker, ScreenshotUploadWorker
+    CalibrationStatusWorker, AnalysisStatusWorker, ScreenshotUploadWorker,
+    CameraPreviewWorker
 )
 
 
@@ -263,7 +262,7 @@ class MainWindow(QMainWindow):
         self.state.viewport_region.h = rect.height() / geo.height()
         
         # mss 녹화 엔진을 위한 실제 물리 픽셀 좌표 계산
-        # Qt의 rect는 논리 좌표이므로 dpr을 곱해야 실제 픽셀 값이 나옵니다.
+        # Qt의 rect는 논리 좌표이므로 dpr을 곱해야 실제 픽셀 값이 나옴
         self.pixel_region = {
             "top": int(rect.y() * dpr),
             "left": int(rect.x() * dpr),
@@ -357,6 +356,8 @@ class MainWindow(QMainWindow):
         재시도 시나리오(AI 분석 실패 후 Screen 1 복귀)를 고려하여,
         이전 폴링 워커가 살아있으면 먼저 종료합니다.
         """
+        self._stop_camera_preview()
+
         if self.state.session_id is None:
             QMessageBox.warning(self, "세션 없음", "먼저 '녹화 범위 설정' 화면에서 세션을 생성해주세요.")
             self._show_screen(0)
@@ -553,7 +554,6 @@ class MainWindow(QMainWindow):
         self.tasks 목록을 기반으로 태스크 QGroupBox 버튼들을 동적으로 재생성한다.
         start_test() 호출 시 tasks_config.json을 다시 읽어 갱신할 수 있다.
         """
-        # [수정] 기존 버튼 제거 시 None 체크를 추가하여 Pylance 오류 해결
         while self._task_group_layout.count():
             item = self._task_group_layout.takeAt(0)
             if item is not None:
@@ -596,24 +596,34 @@ class MainWindow(QMainWindow):
             self._task_group_layout.addWidget(t_group)
 
     def _setup_camera(self):
-        """웹캠 초기화 및 캡처 세션 설정"""
-        try:
-            # 카메라 객체 생성
-            self.camera = QCamera()
-            self.capture_session = QMediaCaptureSession()
-            self.capture_session.setCamera(self.camera)
-            
-            # 비디오 출력 위젯 설정
-            self.viewfinder = QVideoWidget()
-            self.viewfinder.setFixedSize(260, 180) # 패널 너비에 맞춰 조정
-            self.viewfinder.setStyleSheet("border: 1px solid #30363d; background: black; border-radius: 4px;")
-            
-            self.capture_session.setVideoOutput(self.viewfinder)
-            
-            # 카메라 시작
-            self.camera.start()
-        except Exception as e:
-            print(f"⚠️ 카메라 설정을 완료할 수 없습니다: {e}")
+        """웹캠 프리뷰 QLabel을 준비한다. 실제 카메라는 본 테스트 시작 시에만 연다."""
+        self.viewfinder = QLabel("카메라 준비 중")
+        self.viewfinder.setFixedSize(260, 180)
+        self.viewfinder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.viewfinder.setStyleSheet("border: 1px solid #30363d; background: black; color: #8b949e; border-radius: 4px;")
+        self.camera_preview_worker = None
+
+    def _start_camera_preview(self):
+        """OpenCV 기반 웹캠 프리뷰를 별도 스레드에서 시작한다."""
+        worker = getattr(self, "camera_preview_worker", None)
+        if worker is not None and worker.isRunning():
+            return
+
+        self.camera_preview_worker = CameraPreviewWorker(width=260, height=180, fps=20)
+        self.camera_preview_worker.frame_ready.connect(self._on_camera_frame_ready)
+        self.camera_preview_worker.error.connect(lambda msg: self.viewfinder.setText(msg))
+        self.camera_preview_worker.start()
+
+    @Slot(QImage)
+    def _on_camera_frame_ready(self, image: QImage) -> None:
+        self.viewfinder.setPixmap(QPixmap.fromImage(image))
+
+    def _stop_camera_preview(self):
+        """웹캠 프리뷰 스레드를 중지하고 장치를 해제한다."""
+        worker = getattr(self, "camera_preview_worker", None)
+        if worker is not None and worker.isRunning():
+            worker.stop()
+            worker.wait(2000)
 
     # --- 태스크 제어용 헬퍼 함수 ---
     def _ui_start_task(self, name: str, order: int, btn_s: QPushButton, btn_ok: QPushButton, btn_no: QPushButton):
@@ -678,9 +688,7 @@ class MainWindow(QMainWindow):
     
     def _resume_camera_and_start_record(self, pixel_region):
         """카메라를 안정적으로 재개한 후 녹화 워커를 구동합니다."""
-        # QCamera 프리뷰는 본 녹화와 별도이므로 멈추지 않는다. 꺼져 있을 때만 켠다.
-        if hasattr(self, 'camera') and self.camera and not self.camera.isActive():
-            self.camera.start()
+        self._start_camera_preview()
         
         # 녹화 워커 생성 및 실행
         from utils.workers import RecordingWorker
@@ -1000,7 +1008,7 @@ class MainWindow(QMainWindow):
         # 1. 소요 시간 계산
         duration = round(time.time() - self.current_task_info["start_time"], 2)
         
-        # 2. 결과 데이터 구성 (PDF 명세 CL-5: result = "success" | "fail", 한글 금지)
+        # 2. 결과 데이터 구성
         task_entry = {
             "task_order": self.current_task_info["task_order"],
             "result": "success" if is_success else "fail",
@@ -1186,10 +1194,7 @@ class MainWindow(QMainWindow):
 
     def _cleanup_resources(self):
         """카메라 및 녹화 리소스를 안전하게 해제하는 헬퍼 함수"""
-        # 카메라 정지
-        if hasattr(self, 'camera') and self.camera is not None:
-            if self.camera.isActive():
-                self.camera.stop()
+        self._stop_camera_preview()
         
         # 녹화 엔진 정지
         if hasattr(self, 'recorder') and self.recorder is not None:

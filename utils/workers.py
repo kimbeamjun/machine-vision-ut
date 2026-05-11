@@ -2,6 +2,7 @@ import os
 import sys
 import time
 from typing import Any, Dict, List
+import cv2
 
 # 루트 경로 설정
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -11,8 +12,65 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from PySide6.QtCore import QThread, Signal
+from PySide6.QtGui import QImage
 from core.recorder import ScreenRecorder
 from core.api_client import ApiClient
+
+
+class CameraPreviewWorker(QThread):
+    """OpenCV로 웹캠 프레임을 읽어 QLabel에 표시할 QImage를 전달하는 스레드."""
+    frame_ready = Signal(QImage)
+    error = Signal(str)
+
+    def __init__(self, camera_index: int = 0, width: int = 260, height: int = 180, fps: int = 20):
+        super().__init__()
+        self.camera_index = camera_index
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self._running = False
+
+    def run(self):
+        self._running = True
+        cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            cap = cv2.VideoCapture(self.camera_index)
+
+        if not cap.isOpened():
+            self.error.emit("웹캠을 열 수 없습니다.")
+            return
+
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        cap.set(cv2.CAP_PROP_FPS, self.fps)
+
+        frame_interval = 1.0 / max(1, self.fps)
+        try:
+            while self._running:
+                started = time.perf_counter()
+                ret, frame = cap.read()
+                if ret:
+                    frame = cv2.resize(frame, (self.width, self.height))
+                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    bytes_per_line = rgb.shape[1] * rgb.shape[2]
+                    image = QImage(
+                        rgb.data,
+                        rgb.shape[1],
+                        rgb.shape[0],
+                        bytes_per_line,
+                        QImage.Format.Format_RGB888,
+                    ).copy()
+                    self.frame_ready.emit(image)
+
+                elapsed = time.perf_counter() - started
+                sleep_time = frame_interval - elapsed
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+        finally:
+            cap.release()
+
+    def stop(self):
+        self._running = False
 
 
 class RecordingWorker(QThread):

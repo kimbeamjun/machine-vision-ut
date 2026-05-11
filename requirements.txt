@@ -7,6 +7,7 @@ cycler==0.12.1
 flatbuffers==25.12.19
 fonttools==4.62.1
 idna==3.13
+imageio-ffmpeg==0.6.0
 kiwisolver==1.5.0
 matplotlib==3.10.9
 mss==10.2.0

@@ -5,6 +5,7 @@ import subprocess
 import threading
 import time
 import wave
+import importlib
 from mss import mss
 from PySide6.QtCore import QObject, Signal
 from typing import Any
@@ -17,6 +18,12 @@ except ImportError:
     _AUDIO_AVAILABLE = False
     print("⚠️  sounddevice 패키지가 없습니다. 오디오 녹음 없이 영상만 녹화합니다.")
     print("    설치: pip install sounddevice")
+
+try:
+    _imageio_ffmpeg = importlib.import_module("imageio_ffmpeg")
+    _FFMPEG_EXE = _imageio_ffmpeg.get_ffmpeg_exe()
+except ImportError:
+    _FFMPEG_EXE = "ffmpeg"
 
 
 class ScreenRecorder(QObject):
@@ -241,7 +248,7 @@ class ScreenRecorder(QObject):
         # ffmpeg 사용 가능 여부 확인
         try:
             subprocess.run(
-                ["ffmpeg", "-version"],
+                [_FFMPEG_EXE, "-version"],
                 capture_output=True,
                 check=True,
                 timeout=5,
@@ -257,7 +264,7 @@ class ScreenRecorder(QObject):
 
         try:
             cmd = [
-                "ffmpeg", "-y",
+                _FFMPEG_EXE, "-y",
                 "-i", video_path,         # 영상 입력
                 "-i", wav_path,            # 오디오 입력
                 "-c:v", "copy",            # 영상 재인코딩 없이 복사
