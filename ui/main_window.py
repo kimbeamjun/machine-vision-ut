@@ -16,7 +16,7 @@ if ROOT_DIR not in sys.path:
 from PySide6.QtMultimedia import QCamera, QMediaCaptureSession, QImageCapture
 from PySide6.QtMultimediaWidgets import QVideoWidget    
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtCore import Qt, QThreadPool, Slot, QTimer, QUrl, QByteArray, QBuffer, QIODevice
+from PySide6.QtCore import Qt, QThreadPool, Slot, QTimer, QUrl, QByteArray, QBuffer, QIODevice, QPoint
 from PySide6.QtWidgets import (
     QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QProgressBar, QSizePolicy,
@@ -66,6 +66,7 @@ class MainWindow(QMainWindow):
         self.is_uploading = False
         self.video_output_path = os.path.abspath("test_video.mp4")
         self.test_running = False
+        self.is_recording = False
         
         self.tasks = []               # 서버에서 받을 태스크 목록
         self.current_task_index = 0   # 현재 몇 번째 태스크인지 (0부터 시작)
@@ -445,7 +446,7 @@ class MainWindow(QMainWindow):
         self.upload_status_label.setText("✅ 캘리브레이션 완료!")
         QMessageBox.information(self, "준비 완료", "AI 서버가 시선을 학습했습니다. 테스트를 시작합니다.")
         self._show_screen(2)
-        self.start_test()
+        self._start_test()
 
     def _on_calibration_failed(self, failed_points: list) -> None:
         """캘리브레이션 실패 포인트 안내 및 해당 포인트만 재촬영 유도 """
@@ -642,24 +643,79 @@ class MainWindow(QMainWindow):
             # 모든 태스크 완료 시 v5 명세에 따른 종료 처리
             self._handle_test_finished()
 
+    def _start_test(self):
+        """
+        본 테스트 및 영상 녹화 시작.
+        카메라는 유지하고 화면 캡처만 별도 스레드에서 실행한다.
+        """
+        if self.is_recording:
+            return
+
+        try:
+            ts = int(time.time())
+            self.video_output_path = os.path.abspath(f"session_test_{ts}.mp4")
+            self.current_video_path = self.video_output_path
+
+            self.page_logs = []
+            self.task_results = []
+            self.current_task_index = 0
+            self.current_task_info = None
+            self.is_finalized = False
+            self.test_running = True
+            self.tasks = self._load_tasks_config()
+            self._rebuild_task_buttons()
+
+            pixel_region = self._get_recording_region()
+            self._resume_camera_and_start_record(pixel_region)
+            self._load_test_url()
+            
+        except Exception as e:
+            print(f"시작 오류: {e}")
+
     def start_test(self) -> None:
-        """테스트 시작: 화면 녹화 시작 + 태스크 목록 갱신"""
-        self.page_logs.clear()
-        self.state.task_results.clear()
-        self.task_results.clear()
-        self.current_task_index = 0
-        self.test_running = True
-        self.is_finalized = False
+        """기존 호출부 호환용 래퍼."""
+        self._start_test()
+    
+    def _resume_camera_and_start_record(self, pixel_region):
+        """카메라를 안정적으로 재개한 후 녹화 워커를 구동합니다."""
+        # QCamera 프리뷰는 본 녹화와 별도이므로 멈추지 않는다. 꺼져 있을 때만 켠다.
+        if hasattr(self, 'camera') and self.camera and not self.camera.isActive():
+            self.camera.start()
+        
+        # 녹화 워커 생성 및 실행
+        from utils.workers import RecordingWorker
+        self.recording_worker = RecordingWorker(
+            recorder=self.recorder,
+            pixel_region=pixel_region,
+            output_path=self.video_output_path
+        )
+        
+        # 종료 시그널 연결 (병합 완료 확인용)
+        self.recording_worker.finished.connect(lambda: print("✅ 병합 완료"))
+        
+        self.recording_worker.start()
+        self.is_recording = True
+        print(f"🎬 녹화 및 카메라 정상 작동 중: {self.video_output_path}")
 
-        # 테스트 시작마다 tasks_config.json을 다시 읽어 태스크 버튼 재생성
-        self.tasks = self._load_tasks_config()
-        self._rebuild_task_buttons()
+    def _get_recording_region(self) -> dict:
+        """
+        선택 영역이 있으면 그 영역을, 없으면 테스트 브라우저 영역을 물리 픽셀 기준으로 반환한다.
+        """
+        if hasattr(self, "pixel_region"):
+            return dict(self.pixel_region)
 
-        self.video_output_path = os.path.abspath("test_video.mp4")
-        region_to_use = getattr(self, "pixel_region", self.viewport)
-        self.recording_thread = RecordingWorker(self.recorder, region_to_use, self.video_output_path)
-        self.recording_thread.start()
-        self._load_test_url()
+        target = getattr(self, "web_view", None) or self.centralWidget()
+        top_left = target.mapToGlobal(QPoint(0, 0))
+
+        screen = target.windowHandle().screen() if target.windowHandle() else QGuiApplication.primaryScreen()
+        dpr = screen.devicePixelRatio() if screen else 1.0
+
+        return {
+            "left": int(top_left.x() * dpr),
+            "top": int(top_left.y() * dpr),
+            "width": int(target.width() * dpr),
+            "height": int(target.height() * dpr),
+        }
 
     def record_page_entry(self, url: str) -> None:
         """페이지 진입 시 로그 기록 (절대 타임스탬프 기준)"""
@@ -709,7 +765,14 @@ class MainWindow(QMainWindow):
             # URL 변경마다 스크린샷 캡처 후 MinIO 비동기 업로드
             if self.page_logs:
                 self._capture_and_upload_screenshot(self.page_logs[-1])
-
+                
+    def _stop_test(self):
+        """테스트 종료 및 녹화 중지"""
+        if hasattr(self, 'recorder'):
+            self.recorder.stop()
+        self.is_recording = False
+        print("⏹️ 녹화 요청 전송됨 (병합 대기 중...)")
+        
     # ──────────────────────────────────────────────
     # 화면 3: 업로드/분석 대기
     # ──────────────────────────────────────────────
@@ -747,10 +810,11 @@ class MainWindow(QMainWindow):
                 # 2. 녹화 중지 및 스레드 자원 회수
                 if self.recorder.is_recording:
                     self.recorder.stop()
-                    if self.recording_thread and self.recording_thread.isRunning():
-                        self.recording_thread.wait()
+                    if hasattr(self, "recording_worker") and self.recording_worker.isRunning():
+                        self.recording_worker.wait()
                 
                 self.test_running = False
+                self.is_recording = False
                 self.is_finalized = True # 1회성 로직 완료 플래그
 
             # 3. 화면 전환 (Index 3: 업로드 대기 화면)
@@ -802,9 +866,12 @@ class MainWindow(QMainWindow):
     def _on_upload_finished(self, success: bool, message: str) -> None:
         """업로드 워커 종료 시 호출되는 슬롯"""
         if success:
-            self.upload_status_label.setText("✅ 업로드 성공! 분석을 시작합니다.")
+            self.upload_status_label.setText("✅ 업로드 성공! AI 분석 요청이 접수되었습니다.")
+            self.p_bar.setValue(100)
+            self.is_uploading = False
+            self.report_result = {"status": "accepted", "message": message}
             self.is_finalized = False # 다음 테스트를 위해 플래그 초기화
-            self._start_analysis_polling()
+            self._show_screen(4)
         else:
             self.is_uploading = False
             
@@ -1043,6 +1110,8 @@ class MainWindow(QMainWindow):
 
     def _handle_report_download(self) -> None:
         result = getattr(self, "report_result", None) or self.api.get_report_status()
+        if isinstance(result, dict) and result.get("status") == "accepted":
+            result = self.api.get_report_status()
         pdf_bytes = result.get("pdf_bytes") if isinstance(result, dict) else None
         if pdf_bytes:
             reports_dir = os.path.abspath("reports")
@@ -1126,3 +1195,6 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'recorder') and self.recorder is not None:
             if self.recorder.is_recording:
                 self.recorder.stop()
+        if hasattr(self, "recording_worker") and self.recording_worker is not None:
+            if self.recording_worker.isRunning():
+                self.recording_worker.wait(2000)

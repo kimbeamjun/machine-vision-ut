@@ -45,6 +45,7 @@ class CalibrationDialog(QDialog):
         self.cap = cv2.VideoCapture(0)
         self.fourcc = cv2.VideoWriter.fourcc(*'mp4v')
         self.out = None
+        self._finished_emitted = False
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.record_frame)
@@ -131,9 +132,28 @@ class CalibrationDialog(QDialog):
 
     def finish(self):
         """모든 5개 포인트 수집 완료 후 Signal 발송"""
-        if self.cap.isOpened():
-            self.cap.release()
+        if self._finished_emitted:
+            return
+
+        self._finished_emitted = True
+        self._release_camera_resources()
             
         # 메인 윈도우의 업로드 로직으로 데이터 전달
         self.calibration_finished.emit(self.captured_data)
         self.close()
+
+    def closeEvent(self, event):
+        """창이 닫힐 때 웹캠/파일 핸들을 반드시 해제해 본 테스트 카메라와 충돌하지 않게 한다."""
+        self._release_camera_resources()
+        super().closeEvent(event)
+
+    def _release_camera_resources(self):
+        """캘리브레이션 녹화에 사용한 OpenCV 리소스를 안전하게 정리한다."""
+        if self.timer.isActive():
+            self.timer.stop()
+        if self.out:
+            self.out.release()
+            self.out = None
+        if self.cap and self.cap.isOpened():
+            self.cap.release()
+        cv2.destroyAllWindows()
