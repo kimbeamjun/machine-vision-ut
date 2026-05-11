@@ -95,7 +95,7 @@ def run_whisper_analysis(
         # 3. 발화 구간 파싱 + VAD 필터
         raw_segments = []
         for seg in result.get("segments", []):
-            if seg.get("no_speech_prob", 0.0) > 0.6:
+            if seg.get("no_speech_prob", 0.0) > 0.8:
                 continue
             raw_segments.append({
                 "start_ts": round(float(seg["start"]), 3),
