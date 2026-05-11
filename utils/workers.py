@@ -75,6 +75,8 @@ class CameraPreviewWorker(QThread):
 
 class RecordingWorker(QThread):
     """UI 멈춤 방지를 위해 녹화를 백그라운드에서 실행하는 스레드"""
+    error = Signal(str)
+
     def __init__(self, recorder: ScreenRecorder, pixel_region: dict, output_path: str):
         super().__init__()
         self.recorder = recorder
@@ -82,8 +84,10 @@ class RecordingWorker(QThread):
         self.output_path = output_path
 
     def run(self):
-        # 보정된 픽셀 좌표를 recorder에 그대로 전달
-        self.recorder.start(self.pixel_region, self.output_path)
+        try:
+            self.recorder.start(self.pixel_region, self.output_path)
+        except Exception as exc:
+            self.error.emit(str(exc))
         
 
 

@@ -447,7 +447,8 @@ class MainWindow(QMainWindow):
         self.upload_status_label.setText("✅ 캘리브레이션 완료!")
         QMessageBox.information(self, "준비 완료", "AI 서버가 시선을 학습했습니다. 테스트를 시작합니다.")
         self._show_screen(2)
-        self._start_test()
+        self.viewfinder.setText("카메라 장치 준비 중...")
+        QTimer.singleShot(1500, self._start_test)
 
     def _on_calibration_failed(self, failed_points: list) -> None:
         """캘리브레이션 실패 포인트 안내 및 해당 포인트만 재촬영 유도 """
@@ -687,9 +688,15 @@ class MainWindow(QMainWindow):
         self._start_test()
     
     def _resume_camera_and_start_record(self, pixel_region):
-        """카메라를 안정적으로 재개한 후 녹화 워커를 구동합니다."""
-        self._start_camera_preview()
+        """사용자 캠 녹화 워커를 구동하고 녹화 프레임을 오른쪽 프리뷰에 표시합니다."""
         
+        self._stop_camera_preview()
+        try:
+            self.recorder.preview_frame.disconnect(self._on_camera_frame_ready)
+        except (TypeError, RuntimeError):
+            pass
+        self.recorder.preview_frame.connect(self._on_camera_frame_ready)
+
         # 녹화 워커 생성 및 실행
         from utils.workers import RecordingWorker
         self.recording_worker = RecordingWorker(
@@ -699,11 +706,24 @@ class MainWindow(QMainWindow):
         )
         
         # 종료 시그널 연결 (병합 완료 확인용)
+        self.recording_worker.error.connect(self._on_recording_error)
         self.recording_worker.finished.connect(lambda: print("✅ 병합 완료"))
         
         self.recording_worker.start()
         self.is_recording = True
         print(f"🎬 녹화 및 카메라 정상 작동 중: {self.video_output_path}")
+
+    @Slot(str)
+    def _on_recording_error(self, message: str) -> None:
+        """녹화 워커 오류를 앱 종료 대신 사용자 알림으로 처리한다."""
+        self.is_recording = False
+        self.test_running = False
+        self.viewfinder.setText("카메라 연결 실패")
+        QMessageBox.critical(
+            self,
+            "녹화 시작 실패",
+            f"사용자 캠 녹화를 시작하지 못했습니다.\n\n{message}\n\n카메라를 사용하는 다른 앱을 닫고 다시 시도해 주세요.",
+        )
 
     def _get_recording_region(self) -> dict:
         """
