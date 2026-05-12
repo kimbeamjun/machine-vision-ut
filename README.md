@@ -208,7 +208,7 @@ python main.py
 - MinIO presigned URL 업로드 가능 환경
 - AI 서버와 연동 가능한 세션 API
 
-## 🏆 포트폴리오 성과
+## 🏆 개발 성과
 
 - PySide6 기반 데스크톱 테스트 클라이언트 UI 설계 및 구현
 - QWebEngineView 기반 테스트 브라우저와 새 창 처리 구현
