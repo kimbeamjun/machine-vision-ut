@@ -298,17 +298,17 @@ class ScreenshotUploadWorker(QThread):
     """
     finished = Signal(bool, str, str)  # (성공여부, object_key 또는 에러메시지, log_id)
 
-    def __init__(self, api_client, image_data: bytes, log_id: str):
+    def __init__(self, api_client, image_data: bytes, log_id: str, page_no: int):
         super().__init__()
         self.api = api_client
         self.image_data = image_data
         self.log_id = log_id
+        self.page_no = page_no
 
     def run(self):
         try:
-            # file_type="screenshot" 으로 Presigned URL 발급
-            # api_client의 file_type 하드코딩 버그 수정 후 정상 동작
-            url_data = self.api.request_presigned_url(file_type="screenshot")
+            # file_type="screenshot" + page_no로 페이지별 Presigned URL 발급
+            url_data = self.api.request_presigned_url(file_type="screenshot", page_no=self.page_no)
             presigned_url = url_data.get("presigned_url")
             object_key = url_data.get("object_key", "")
 

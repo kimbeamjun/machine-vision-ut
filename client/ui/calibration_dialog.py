@@ -12,6 +12,11 @@ class CalibrationDialog(QDialog):
     """
     calibration_finished = Signal(list)
 
+    FIXATION_DELAY_MS = 1500
+    RECORD_DURATION_MS = 2500
+    FRAME_INTERVAL_MS = 50
+    VIDEO_SIZE = (640, 480)
+
     # 기본 5점 레이아웃
     _DEFAULT_POINTS = [
         {"point_no": 1, "screen_x": 0.1, "screen_y": 0.1},
@@ -42,10 +47,12 @@ class CalibrationDialog(QDialog):
         self.setStyleSheet("background-color: black;")
 
         # 4. 카메라 및 녹화 설정
-        self.cap = cv2.VideoCapture(0)
+        self.cap = self._open_camera()
         self.fourcc = cv2.VideoWriter.fourcc(*'mp4v')
         self.out = None
         self._finished_emitted = False
+        self.is_recording_point = False
+        self.current_save_path = ""
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.record_frame)
@@ -64,44 +71,63 @@ class CalibrationDialog(QDialog):
         self.next_point()
 
     def next_point(self):
-        """다음 포인트 촬영 준비 및 녹화 시작"""
+        """다음 포인트를 먼저 표시하고, 사용자가 응시할 시간을 확보한 뒤 녹화를 시작"""
         if self.current_index < len(self.points):
             point = self.points[self.current_index]
             
             # 파일명 규칙: calib_pt_1.mp4 형식
             file_name = f"calib_pt_{point['point_no']}.mp4"
-            save_path = os.path.abspath(file_name)
-
-            # 녹화 파일 생성 (640x480, 20fps)
-            self.out = cv2.VideoWriter(save_path, self.fourcc, 20.0, (640, 480))
+            self.current_save_path = os.path.abspath(file_name)
 
             # 수집 데이터 리스트에 추가 (KeyError 방지를 위해 screen_x 필드명 고정)
             self.captured_data.append({
                 "point_no": point['point_no'],
                 "screen_x": point['screen_x'], 
                 "screen_y": point['screen_y'], 
-                "path": save_path,
+                "path": self.current_save_path,
             })
 
-            self.update() # 화면 갱신 (빨간 점 그리기)
-            self.timer.start(50) # 녹화 시작 (50ms = 20fps)
-            
-            # 3초간 촬영 후 자동으로 정지하고 다음 포인트로 이동
-            QTimer.singleShot(3000, self.stop_point_recording)
+            # 포인트를 먼저 화면에 보여주고, 1.5초간 응시 시간을 확보한 뒤 녹화 시작
+            self.is_recording_point = False
+            self.update()
+            QTimer.singleShot(self.FIXATION_DELAY_MS, self.start_point_recording)
         else:
             self.finish()
 
+    def start_point_recording(self):
+        """현재 포인트를 충분히 응시한 뒤 웹캠 녹화를 시작"""
+        if self._finished_emitted or self.current_index >= len(self.points):
+            return
+
+        if not self.cap or not self.cap.isOpened():
+            self.cap = self._open_camera()
+        if not self.cap.isOpened():
+            self.finish()
+            return
+
+        self.out = cv2.VideoWriter(self.current_save_path, self.fourcc, 20.0, self.VIDEO_SIZE)
+        if not self.out.isOpened():
+            self.finish()
+            return
+
+        self.is_recording_point = True
+        self.timer.start(self.FRAME_INTERVAL_MS)
+
+        # 안정적으로 응시한 구간만 녹화하고 다음 포인트로 이동
+        QTimer.singleShot(self.RECORD_DURATION_MS, self.stop_point_recording)
+
     def record_frame(self):
         """카메라 프레임을 비디오 파일로 저장"""
-        if self.cap.isOpened() and self.out:
+        if self.is_recording_point and self.cap.isOpened() and self.out:
             ret, frame = self.cap.read()
             if ret:
-                frame = cv2.resize(frame, (640, 480))
+                frame = cv2.resize(frame, self.VIDEO_SIZE)
                 self.out.write(frame)
 
     def stop_point_recording(self):
         """현재 포인트 녹화 종료 및 다음 인덱스로 이동"""
         self.timer.stop()
+        self.is_recording_point = False
         if self.out:
             self.out.release()
             self.out = None
@@ -149,6 +175,7 @@ class CalibrationDialog(QDialog):
 
     def _release_camera_resources(self):
         """캘리브레이션 녹화에 사용한 OpenCV 리소스를 안전하게 정리한다."""
+        self.is_recording_point = False
         if self.timer.isActive():
             self.timer.stop()
         if self.out:
@@ -157,3 +184,24 @@ class CalibrationDialog(QDialog):
         if self.cap and self.cap.isOpened():
             self.cap.release()
         cv2.destroyAllWindows()
+
+    @staticmethod
+    def _open_camera():
+        """캘리브레이션 영상은 화면 캡처가 아니라 사용자 웹캠 영상을 녹화한다."""
+        backends = []
+        if hasattr(cv2, "CAP_DSHOW"):
+            backends.append(cv2.CAP_DSHOW)
+        if hasattr(cv2, "CAP_MSMF"):
+            backends.append(cv2.CAP_MSMF)
+        backends.append(cv2.CAP_ANY)
+
+        for backend in backends:
+            cap = cv2.VideoCapture(0) if backend == cv2.CAP_ANY else cv2.VideoCapture(0, backend)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, CalibrationDialog.VIDEO_SIZE[0])
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CalibrationDialog.VIDEO_SIZE[1])
+                cap.set(cv2.CAP_PROP_FPS, 20)
+                return cap
+            cap.release()
+
+        return cv2.VideoCapture(-1)
