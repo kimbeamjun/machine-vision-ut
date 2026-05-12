@@ -1204,12 +1204,7 @@ class MainWindow(QMainWindow):
             pdf_bytes = result.get("pdf_bytes") if isinstance(result, dict) else None
 
             if not pdf_bytes and isinstance(result, dict):
-                pdf_url = (
-                    result.get("pdf_url")
-                    or result.get("pdf_presigned_url")
-                    or result.get("download_url")
-                    or result.get("report_url")
-                )
+                pdf_url = self._extract_report_url(result)
                 if pdf_url:
                     pdf_bytes = self.api.download_file_from_url(pdf_url)
 
@@ -1222,13 +1217,52 @@ class MainWindow(QMainWindow):
             if status in {"generating", "accepted", "processing"}:
                 QMessageBox.information(self, "보고서 생성 중", "PDF가 아직 생성 중입니다. 잠시 후 다시 시도해 주세요.")
             else:
+                response_detail = self._format_report_response(result)
                 QMessageBox.warning(
                     self,
                     "보고서 다운로드 실패",
-                    f"서버 응답에서 PDF 파일 또는 다운로드 URL을 찾지 못했습니다.\n현재 상태: {status}",
+                    "서버 응답에서 PDF 파일 또는 다운로드 URL을 찾지 못했습니다.\n"
+                    f"현재 상태: {status}\n\n"
+                    f"응답 내용:\n{response_detail}",
                 )
         except Exception as exc:
             QMessageBox.critical(self, "보고서 다운로드 오류", f"PDF 다운로드 중 오류가 발생했습니다:\n{exc}")
+
+    def _extract_report_url(self, result: Dict[str, Any]) -> Optional[str]:
+        """서버별로 다르게 내려올 수 있는 PDF URL 필드를 최대한 폭넓게 처리한다."""
+        candidate_keys = (
+            "pdf_url",
+            "pdf_presigned_url",
+            "pdf_download_url",
+            "report_url",
+            "report_presigned_url",
+            "download_url",
+            "presigned_url",
+            "url",
+            "file_url",
+        )
+
+        for key in candidate_keys:
+            value = result.get(key)
+            if isinstance(value, str) and value.startswith(("http://", "https://")):
+                return value
+
+        nested_keys = ("data", "result", "report", "pdf")
+        for key in nested_keys:
+            value = result.get(key)
+            if isinstance(value, dict):
+                nested_url = self._extract_report_url(value)
+                if nested_url:
+                    return nested_url
+
+        return None
+
+    @staticmethod
+    def _format_report_response(result: Any) -> str:
+        if isinstance(result, dict):
+            items = [f"{key}: {value}" for key, value in result.items()]
+            return "\n".join(items[:8]) if items else "{}"
+        return str(result)
 
     def _save_report_pdf(self, pdf_bytes: bytes) -> str:
         reports_dir = os.path.abspath("reports")

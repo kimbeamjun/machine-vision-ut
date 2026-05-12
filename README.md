@@ -1,24 +1,31 @@
 # 🎯 UT Automation Client
 
-> **사용성 테스트 AI 자동화 프로젝트 - 클라이언트 파트**  
-> PySide6 기반 데스크톱 앱으로 캘리브레이션, 사용자 캠 녹화, 음성 녹음, 테스트 로그 수집, 서버 업로드, AI 분석 요청까지 담당합니다.
+> 사용성 테스트 AI 자동화 프로젝트의 클라이언트 파트입니다.  
+> PySide6 기반 데스크톱 앱에서 캘리브레이션, 웹 테스트 진행, 사용자 캠 녹화, 음성 녹음, 페이지 로그 수집, 스크린샷 업로드, AI 분석 요청, PDF 보고서 다운로드까지 담당합니다.
 
-사용자가 웹 테스트 시나리오를 수행하는 동안 클라이언트는 **캘리브레이션 영상**, **본 테스트 사용자 캠 영상**, **음성**, **페이지 이동 로그**, **태스크 수행 결과**를 수집하고 서버 API와 MinIO 업로드 흐름에 맞춰 전송합니다.
+이 클라이언트는 사용자가 웹 페이지나 영상 콘텐츠를 탐색하는 동안 얼굴 영상, 음성, 페이지 이동 기록, 테스트 수행 결과를 수집하고 서버 API 및 MinIO 업로드 흐름에 맞춰 전송합니다. AI 서버는 전달된 사용자 캠 영상과 메타데이터를 기반으로 시선, 표정, 음성을 분석하고 최종 PDF 보고서를 생성합니다.
 
-이 프로젝트에서 클라이언트 파트는 데스크톱 UI, 사용자 캠 녹화, 음성 녹음, 캘리브레이션 업로드, 테스트 메타데이터 전송, 분석 요청 트리거를 담당합니다.
+## 📌 프로젝트 개요
 
-## ✨ 주요 기능
+- 프로젝트명: UT Automation Client
+- 담당 영역: 클라이언트 애플리케이션
+- 핵심 목표: 사용성 테스트 데이터를 자동 수집하고 AI 분석 서버로 안정적으로 전달
+- 주요 사용자: 사용성 테스트 진행자, 피험자, 프로젝트 평가자
+- 개발 형태: Python 데스크톱 클라이언트
 
-- PySide6 기반 데스크톱 GUI
-- 서버 URL 및 녹화/분석 세션 생성
-- 5점 캘리브레이션 웹캠 영상 촬영
-- 캘리브레이션 영상 MinIO 업로드 및 서버 분석 요청
-- 본 테스트 사용자 캠 영상 녹화
-- 마이크 음성 녹음 및 영상 파일 병합
-- 테스트 페이지 이동 로그 및 스크린샷 업로드
-- 태스크 성공/실패 및 수행 시간 기록
-- 본 테스트 영상, 페이지 로그, 태스크 결과 서버 전송
-- AI 분석 요청 후 PDF 리포트 확인 흐름 지원
+## ✅ 주요 기능
+
+- PySide6 기반 사용성 테스트 GUI 제공
+- 테스트 URL 입력 및 내장 브라우저 탐색
+- 새 창 또는 새 탭 링크를 현재 테스트 브라우저 안에서 처리
+- 5점 캘리브레이션 촬영 및 서버 업로드
+- 캘리브레이션 포인트 표시 후 응시 시간 확보
+- 본 테스트 중 사용자 웹캠 영상 녹화
+- 본 테스트 중 마이크 음성 녹음 및 영상 파일 병합
+- 페이지 이동 로그, 페이지별 스크린샷, 테스트 결과 수집
+- 페이지별 스크린샷에 page_no를 포함하여 업로드
+- 테스트 종료 후 메타데이터 전송 및 AI 분석 요청
+- 서버 응답 기반 PDF 보고서 다운로드
 
 ## 🧰 기술 스택
 
@@ -26,6 +33,7 @@
 | --- | --- |
 | Language | Python |
 | GUI | PySide6, QtWebEngine |
+| Browser | QWebEngineView |
 | Camera | OpenCV |
 | Audio | sounddevice, wave |
 | Video Processing | OpenCV VideoWriter, imageio-ffmpeg |
@@ -33,94 +41,91 @@
 | Storage Upload | MinIO Presigned URL |
 | Async Worker | QThread, Signal/Slot |
 
+## 🏗️ 시스템 아키텍처
+
+```mermaid
+flowchart LR
+    User["사용자"] --> Client["PySide6 Client"]
+    Client --> MainServer["Main Server API"]
+    MainServer --> MinIO["MinIO Storage"]
+    MainServer --> AIServer["AI Server"]
+    AIServer --> MinIO
+    Client --> Report["PDF Report Download"]
+```
+
+## 🔄 사용자 흐름
+
+```mermaid
+flowchart TD
+    A["녹화 범위 설정"] --> B["테스트 세션 생성"]
+    B --> C["5점 캘리브레이션 진행"]
+    C --> D["캘리브레이션 영상 업로드"]
+    D --> E["캘리브레이션 분석 요청"]
+    E --> F{"캘리브레이션 성공 여부"}
+    F -- "실패" --> C
+    F -- "성공" --> G["본 테스트 진행"]
+    G --> H["사용자 캠 영상 및 음성 녹화"]
+    G --> I["페이지 로그 및 스크린샷 수집"]
+    H --> J["녹화 파일 병합"]
+    I --> K["메타데이터 전송"]
+    J --> L["녹화 파일 업로드"]
+    K --> M["AI 분석 요청"]
+    L --> M
+    M --> N["PDF 보고서 생성"]
+    N --> O["클라이언트에서 보고서 다운로드"]
+```
+
 ## 📁 프로젝트 구조
 
 ```text
 ut_client/
   main.py
   requirements.txt
+  README.md
   core/
-    api_client.py         # 서버 API 및 MinIO 업로드 클라이언트
-    recorder.py           # 본 테스트 사용자 캠 녹화 및 음성 녹음
+    api_client.py         # 서버 API, MinIO 업로드, 보고서 다운로드 처리
+    recorder.py           # 사용자 캠 녹화, 음성 녹음, MP4 병합
   ui/
-    main_window.py        # 전체 화면 흐름, 테스트 UI, 업로드/분석 UI
+    main_window.py        # 메인 화면, 테스트 진행, 업로드, 보고서 UI
     calibration_dialog.py # 5점 캘리브레이션 촬영 다이얼로그
-    overlay.py            # 녹화 영역 선택 오버레이
+    overlay.py            # 녹화 범위 선택 오버레이
     widgets.py            # 공통 UI 위젯
     styles.py             # QSS 스타일
   utils/
-    workers.py            # QThread 기반 업로드, 녹화, 분석 워커
+    workers.py            # QThread 기반 녹화, 업로드, 스크린샷 worker
   models/
     models.py             # 클라이언트 상태 및 데이터 모델
 ```
 
-## 🧭 사용자 흐름
-
-```mermaid
-flowchart TD
-    A["녹화 범위 설정"] --> B["🧾 세션 생성"]
-    B --> C["5점 캘리브레이션 촬영"]
-    C --> D["캘리브레이션 영상 업로드"]
-    D --> E["AI 캘리브레이션 분석"]
-    E --> F{"캘리브레이션 성공?"}
-    F -- "실패" --> C
-    F -- "성공" --> G["🧪 본 테스트 진행"]
-    G --> H["사용자 캠 + 🎙️ 음성 녹화"]
-    G --> I["페이지 로그 및 태스크 결과 수집"]
-    H --> J["영상/음성 병합"]
-    I --> K["메타데이터 전송"]
-    J --> L["MinIO recording.mp4 업로드"]
-    K --> M["AI 분석 요청"]
-    L --> M
-    M --> N["PDF 리포트 생성"]
-```
-
-## 🔌 API 연동 요약
+## 🔌 API 연동
 
 | 단계 | 메서드 | URL | 목적 |
 | --- | --- | --- | --- |
-| 세션 생성 | POST | `/api/v1/sessions` | viewport 정보와 함께 테스트 세션 생성 |
-| 캘리브레이션 URL 요청 | POST | `/api/v1/sessions/{session_id}/calibrate/presigned-url` | 포인트별 영상 업로드 URL 발급 |
-| 캘리브레이션 분석 | POST | `/api/v1/sessions/{session_id}/calibrate/start` | 5점 캘리브레이션 분석 시작 |
-| 메타데이터 전송 | POST | `/api/v1/sessions/{session_id}/metadata` | 페이지 로그 및 태스크 결과 전송 |
-| 본 영상 URL 요청 | POST | `/api/v1/sessions/{session_id}/presigned-url` | `recording.mp4` 업로드 URL 발급 |
-| 본 분석 시작 | POST | `/api/v1/sessions/{session_id}/analyze` | 사용자 캠 영상, 음성, 로그 기반 분석 요청 |
+| 세션 생성 | POST | `/api/v1/sessions` | 테스트 세션 생성 |
+| 캘리브레이션 업로드 URL 요청 | POST | `/api/v1/sessions/{session_id}/calibrate/presigned-url` | 포인트별 캘리브레이션 영상 업로드 URL 발급 |
+| 캘리브레이션 분석 요청 | POST | `/api/v1/sessions/{session_id}/calibrate/start` | 5점 캘리브레이션 분석 시작 |
+| 스크린샷 업로드 URL 요청 | POST | `/api/v1/sessions/{session_id}/presigned-url` | 페이지별 스크린샷 업로드 URL 발급 |
+| 메타데이터 전송 | POST | `/api/v1/sessions/{session_id}/metadata` | 페이지 로그, 테스트 결과, 스크린샷 정보 전송 |
+| 본 테스트 영상 업로드 URL 요청 | POST | `/api/v1/sessions/{session_id}/presigned-url` | 사용자 캠 녹화 파일 업로드 URL 발급 |
+| 분석 시작 | POST | `/api/v1/sessions/{session_id}/analyze` | 사용자 캠 영상, 음성, 로그 기반 분석 요청 |
+| 보고서 조회 | GET | `/api/v1/sessions/{session_id}/report` | PDF 파일 또는 다운로드 URL 조회 |
 
 ## 🧩 핵심 구현
 
-### 1. 👤 본 테스트 사용자 캠 녹화
+### 사용자 캠 중심 녹화
 
-본 테스트 영상은 웹페이지 화면이 아니라 AI 분석 대상인 사용자 얼굴 영상이어야 합니다. 따라서 `core/recorder.py`에서 화면 캡처 방식 대신 OpenCV 웹캠 프레임을 직접 녹화하도록 구성했습니다.
+초기 구현에서는 화면 또는 페이지가 녹화되는 문제가 있었으나, AI 서버가 필요로 하는 데이터는 사용자 얼굴 영상이므로 본 테스트 녹화 대상을 웹캠으로 변경했습니다. `core/recorder.py`에서 OpenCV로 웹캠 프레임을 읽고, 같은 프레임을 UI 미리보기와 녹화 파일에 동시에 사용합니다.
 
 ```python
-cap = self._open_camera()
-
-if not cap.isOpened():
-    self.is_recording = False
-    raise RuntimeError("웹캠을 열 수 없습니다. 다른 프로그램이 카메라를 사용 중인지 확인하세요.")
-
 ret, frame = cap.read()
 frame = cv2.resize(frame, (frame_width, frame_height))
 self.writer.write(frame)
-```
-
-### 2. 🔄 녹화 프레임과 UI 프리뷰 동기화
-
-오른쪽 사용자 캠 프리뷰가 실제 업로드 영상과 다르면 분석 결과를 검증하기 어렵습니다. 녹화 중인 프레임을 `preview_frame` 시그널로 UI에 그대로 전달하도록 만들었습니다.
-
-```python
-preview_frame = Signal(QImage)
-...
 self.preview_frame.emit(image)
 ```
 
-```python
-self.recorder.preview_frame.connect(self._on_camera_frame_ready)
-```
+### 음성 녹음 및 영상 병합
 
-### 3. 🎙️ 음성 녹음 및 MP4 병합
-
-마이크 입력은 `sounddevice`로 받고, WAV 파일에 스트리밍 저장한 뒤 `imageio-ffmpeg`를 사용해 사용자 캠 영상과 병합합니다.
+테스트 중 음성 분석을 위해 `sounddevice`로 마이크 입력을 WAV 파일에 스트리밍 저장하고, 녹화 종료 후 `imageio-ffmpeg`가 제공하는 ffmpeg 실행 파일로 사용자 캠 영상과 음성을 하나의 MP4 파일로 병합합니다.
 
 ```python
 with wave.open(wav_path, "wb") as wf:
@@ -142,41 +147,39 @@ cmd = [
 ]
 ```
 
-### 4. ⚙️ 작업 분리와 UI 멈춤 방지
+### 캘리브레이션 안정화
 
-녹화, 업로드, 분석 상태 확인은 UI 스레드에서 직접 처리하지 않고 `QThread` 기반 worker로 분리했습니다.
+AI 서버에서 모든 포인트의 gaze 값이 거의 동일하다는 피드백이 있었기 때문에 포인트 표시 직후 바로 녹화하지 않고, 사용자가 해당 포인트를 응시할 시간을 둔 뒤 녹화를 시작하도록 수정했습니다.
 
 ```python
-class RecordingWorker(QThread):
-    error = Signal(str)
-
-    def run(self):
-        try:
-            self.recorder.start(self.pixel_region, self.output_path)
-        except Exception as exc:
-            self.error.emit(str(exc))
+FIXATION_DELAY_MS = 1500
+RECORD_DURATION_MS = 2500
 ```
+
+캘리브레이션 포인트는 좌상단, 우상단, 중앙, 좌하단, 우하단처럼 화면 구석과 중앙을 포함하도록 구성했습니다.
+
+### 페이지별 스크린샷 수집
+
+히트맵이 마지막 페이지 기준으로만 생성되는 문제를 줄이기 위해 페이지 이동 시점마다 `loadFinished` 이벤트 기준으로 스크린샷을 캡처하고, `page_no`를 포함해 서버로 업로드합니다. 전체 화면이 아닌 테스트 브라우저 영역을 우선 캡처하도록 조정했습니다.
+
+### PDF 보고서 다운로드
+
+MinIO에는 PDF가 생성되어 있지만 클라이언트에서 다운로드하지 못하는 문제가 있어 서버 응답에서 다양한 URL 키를 탐색하도록 보강했습니다. 서버가 PDF 바이너리를 직접 반환하는 경우와 presigned URL을 반환하는 경우를 모두 처리합니다.
 
 ## 🛠️ 문제 발생 및 해결 방법
 
-| 문제 | 원인 | 해결 |
+| 문제 | 원인 | 해결 방법 |
 | --- | --- | --- |
-| 본 테스트 영상이 페이지 화면으로 저장됨 | 기존 recorder가 화면 캡처 기반으로 동작 | OpenCV 웹캠 녹화 방식으로 전환 |
-| 캘리브레이션 후 본 테스트 진입 시 앱이 튕김 | 캘리브레이션 직후 카메라 장치가 완전히 해제되기 전에 재오픈 | 카메라 리소스 명시 해제, 1.5초 지연 후 녹화 시작, 카메라 백엔드 순차 재시도 |
-| 사용자 캠 프리뷰가 멈춤 | QCamera/QVideoWidget 프리뷰와 OpenCV 녹화가 카메라를 중복 사용 | 실제 녹화 프레임을 UI 프리뷰에 전달하는 방식으로 단일 소스화 |
-| 말을 하면 사용자 캠이 멈춤 | 오디오 콜백에서 메모리 누적 및 웹캠 내장 마이크 충돌 가능성 | WAV 스트리밍 저장, high latency 설정, 웹캠 마이크가 아닌 입력 장치 우선 선택 |
-| 오디오가 MP4에 포함되지 않음 | 시스템 ffmpeg 미설치 | `imageio-ffmpeg`의 ffmpeg 실행 파일을 자동 사용하도록 보강 |
-| 녹화 실패 시 프로그램 강제종료 | QThread 내부 예외가 UI에서 처리되지 않음 | `RecordingWorker.error` 시그널로 예외 전달 및 메시지 박스 처리 |
-| 캘리브레이션 실패 포인트 재촬영 필요 | AI 서버가 일부 포인트 실패 반환 | 실패 포인트만 필터링하여 재촬영 흐름 구성 |
-
-## 🧱 안정성 개선 포인트
-
-- 캘리브레이션 종료 시 `VideoCapture`, `VideoWriter`, `QTimer` 해제
-- ⏱본 테스트 시작 전 카메라 장치 준비 시간 확보
-- `CAP_ANY`, `CAP_MSMF`, `CAP_DSHOW` 순차 시도
-- 오디오 데이터를 메모리에 누적하지 않고 WAV 파일로 즉시 저장
-- 녹화 worker 예외를 UI에 안전하게 전달
-- MinIO 업로드 실패 시 재시도 및 사용자 안내
+| 본 테스트 영상이 페이지 화면으로 저장됨 | 기존 녹화 대상이 화면 캡처 흐름에 가까웠음 | 본 테스트 녹화를 OpenCV 기반 사용자 웹캠 녹화로 변경 |
+| 본 테스트 시작 시 사용자 캠이 멈춤 | UI 미리보기와 녹화 로직이 카메라를 중복 점유 | 녹화 프레임을 UI 미리보기에도 전달하는 단일 소스 방식으로 변경 |
+| 말을 하면 사용자 캠이 멈춤 | 오디오 콜백 부하와 카메라 내장 마이크 충돌 가능성 | WAV 스트리밍 저장, high latency 설정, 비카메라 마이크 우선 선택 |
+| 오디오가 녹화 파일에 포함되지 않음 | 시스템 ffmpeg 의존성 또는 병합 로직 부족 | imageio-ffmpeg 기반 자동 병합 처리 추가 |
+| 캘리브레이션 gaze 값이 거의 동일함 | 포인트 표시 직후 녹화가 시작되어 응시 시간이 부족 | 포인트 표시 후 1.5초 대기, 이후 2.5초 녹화로 변경 |
+| 캘리브레이션 후 본 테스트 진입 시 강제 종료 | 카메라 리소스 해제 타이밍과 재오픈 충돌 | 캘리브레이션 종료 시 리소스 명시 해제, 본 테스트 카메라 오픈 안정화 |
+| 네이버 메뉴 클릭 시 반응 없음 | 새 창 또는 새 탭 요청을 QWebEngineView가 처리하지 못함 | `createWindow`를 재정의해 현재 테스트 브라우저에서 열리도록 처리 |
+| 히트맵이 마지막 페이지 위주로 생성됨 | 스크린샷과 페이지 로그가 페이지별로 충분히 분리되지 않음 | 페이지 로드 완료 기준 캡처, page_no 포함 업로드, 업로드 완료 후 메타데이터 전송 |
+| PDF가 MinIO에 있는데 다운로드 실패 | 서버 응답의 PDF URL 키 형식이 클라이언트 예상과 다름 | 여러 응답 키와 중첩 구조를 탐색하고 PDF 바이너리 응답도 처리 |
+| TVING 같은 OTT 영상 재생 불가 | DRM, Widevine, 서비스 정책상 QtWebEngine 재생 제한 | 비DRM 영상 또는 테스트용 영상 페이지 사용 권장 |
 
 ## 🚀 실행 방법
 
@@ -185,39 +188,43 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
-앱 실행 후 다음 순서로 테스트합니다.
+실행 후 기본 흐름은 다음과 같습니다.
 
-1. Server URL 확인
-2. 녹화 범위 설정 및 세션 생성
-3. 5점 캘리브레이션 촬영
-4. 캘리브레이션 업로드 및 분석 결과 대기
-5. 본 테스트 진행
-6. 사용자 캠 영상 및 🎙️ 음성 녹화
-7. 테스트 종료 및 데이터 전송
-8. 분석 리포트 확인
+1. Server URL을 확인합니다.
+2. 녹화 범위를 설정하고 세션을 생성합니다.
+3. 5점 캘리브레이션을 진행합니다.
+4. 캘리브레이션 업로드와 분석 완료를 기다립니다.
+5. 테스트 URL을 열고 본 테스트를 진행합니다.
+6. 사용자 캠 영상, 음성, 페이지 로그, 스크린샷을 수집합니다.
+7. 테스트 종료 후 데이터를 서버로 전송합니다.
+8. AI 분석이 끝나면 PDF 보고서를 다운로드합니다.
 
-## 📌 요구사항
+## 📋 요구사항
 
 - Python 3.11 권장
 - 웹캠
 - 마이크
 - 접근 가능한 Main Server
-- MinIO Presigned URL 업로드 가능 환경
+- MinIO presigned URL 업로드 가능 환경
+- AI 서버와 연동 가능한 세션 API
 
-## 🏆 포트폴리오 관점에서의 담당 성과
+## 🏆 포트폴리오 성과
 
-- PySide6 기반 데스크톱 클라이언트 UI 설계 및 구현
-- 서버 API 명세에 맞춘 세션, 캘리브레이션, 메타데이터, 분석 요청 흐름 구현
+- PySide6 기반 데스크톱 테스트 클라이언트 UI 설계 및 구현
+- QWebEngineView 기반 테스트 브라우저와 새 창 처리 구현
 - OpenCV 기반 사용자 캠 녹화 파이프라인 구현
-- sounddevice 기반 음성 녹음 및 ffmpeg 병합 처리
-- MinIO Presigned URL 업로드 처리
-- QThread 기반 비동기 작업 처리로 UI 응답성 확보
-- 실제 테스트 중 발생한 카메라 충돌, 오디오 충돌, 영상 대상 불일치 문제를 단계적으로 원인 분석 및 개선
+- sounddevice 기반 음성 녹음 및 ffmpeg 병합 처리 구현
+- 5점 캘리브레이션 촬영 및 안정화 로직 구현
+- MinIO presigned URL 기반 파일 업로드 구현
+- 페이지별 스크린샷 및 로그 수집 흐름 개선
+- AI 분석 요청 및 PDF 보고서 다운로드 흐름 구현
+- 실제 테스트 중 발생한 카메라 멈춤, 오디오 누락, 히트맵 오류, 보고서 다운로드 실패 문제를 단계적으로 분석하고 해결
 
 ## 🔮 향후 개선 방향
 
 - UI에서 마이크 입력 장치를 직접 선택하는 설정 화면 추가
-- 녹화 전 카메라/마이크 상태 점검 기능 추가
+- 녹화 전 카메라와 마이크 상태 자동 점검 기능 추가
 - 업로드 실패 파일 로컬 큐 저장 및 재전송 기능 추가
-- 분석 완료 알림 및 PDF 다운로드 상태 표시 개선
-- 테스트 로그와 영상 타임스탬프 정합성 검증 자동화
+- 분석 진행률과 보고서 생성 상태 표시 개선
+- 테스트 로그와 영상 타임스탬프 정합성 자동 검증
+- DRM 영상이 필요한 테스트의 경우 외부 브라우저 연동 방식 검토
