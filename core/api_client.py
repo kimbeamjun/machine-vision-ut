@@ -63,9 +63,15 @@ class ApiClient:
             path = f"/api/v1/sessions/{self.session_id}/calibrate/presigned-url"
             return self._post(path, payload)
         else:
-            # file_type 파라미터를 그대로 전달
+            # file_type 파라미터를 그대로 전달.
+            # screenshot은 페이지별 히트맵 배경이 덮어쓰기 되지 않도록 page_no를 함께 전달한다.
             path = f"/api/v1/sessions/{self.session_id}/presigned-url"
-            return self._post(path, {"file_type": file_type})
+            payload: Dict[str, Any] = {"file_type": file_type}
+            if file_type == "screenshot":
+                page_no = kwargs.get("page_no")
+                if page_no is not None:
+                    payload["page_no"] = int(page_no)
+            return self._post(path, payload)
         
     def upload_file(self, presigned_url: str, file_path: str) -> bool:
         """
@@ -175,6 +181,15 @@ class ApiClient:
         if "application/pdf" in response.headers.get("content-type", ""):
             return {"status": "done", "pdf_bytes": response.content}
         return response.json()
+
+    def download_file_from_url(self, url: str) -> bytes:
+        """Presigned URL 또는 일반 다운로드 URL에서 파일 바이트를 내려받는다."""
+        if "localhost" in url:
+            url = url.replace("localhost", "10.10.10.113")
+
+        response = requests.get(url, timeout=60)
+        response.raise_for_status()
+        return response.content
 
     def upload_bytes(self, presigned_url: str, data: bytes, content_type: str = "image/png") -> bool:
         """

@@ -24,9 +24,33 @@ from PySide6.QtWidgets import (
 
 
 try:
-    from PySide6.QtWebEngineWidgets import QWebEngineView
+    from PySide6.QtWebEngineWidgets import QWebEngineView as _ImportedWebEngineView
+    WEBENGINE_AVAILABLE = True
 except ImportError:
-    QWebEngineView = None
+    _ImportedWebEngineView = QWidget
+    WEBENGINE_AVAILABLE = False
+
+QWebEngineViewBase: Any = _ImportedWebEngineView
+
+class TestWebView(QWebEngineViewBase):
+    """새 창/새 탭 요청을 현재 테스트 웹뷰 안에서 열도록 처리합니다."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._popup_view = None
+
+    def createWindow(self, window_type):
+        popup = QWebEngineViewBase(self)
+        self._popup_view = popup
+
+        def _open_in_current_view(url: QUrl) -> None:
+            if url.isValid() and not url.isEmpty():
+                self.setUrl(url)
+            popup.deleteLater()
+            self._popup_view = None
+
+        popup.urlChanged.connect(_open_in_current_view)
+        return popup
 
 try:
     from models.models import ClientState, PageLog
@@ -57,6 +81,7 @@ class MainWindow(QMainWindow):
 
         # 2. 녹화 영역 및 세션 변수 초기화
         self.viewport = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+        self.capture_region = None
         self.session_id: Optional[str] = None
         self.page_logs: List[Dict[str, Any]] = []
         self.recording_thread = None
@@ -269,6 +294,12 @@ class MainWindow(QMainWindow):
             "width": int(rect.width() * dpr),
             "height": int(rect.height() * dpr)
         }
+        self.capture_region = {
+            "top": rect.y(),
+            "left": rect.x(),
+            "width": rect.width(),
+            "height": rect.height(),
+        }
 
         self.viewport = self.state.viewport_region.as_payload()
         self.region_preview.update()
@@ -474,7 +505,7 @@ class MainWindow(QMainWindow):
             main_layout = QVBoxLayout(main)
 
             url_bar = QHBoxLayout()
-            self.test_url_input = QLineEdit("https://example.com")
+            self.test_url_input = QLineEdit("https://www.youtube.com/")
             self.test_url_input.returnPressed.connect(self._load_test_url)
             btn_go = QPushButton("이동")
             btn_go.clicked.connect(self._load_test_url)
@@ -482,10 +513,11 @@ class MainWindow(QMainWindow):
             url_bar.addWidget(btn_go)
             main_layout.addLayout(url_bar)
 
-            if QWebEngineView is not None:
-                self.web_view = QWebEngineView()
+            if WEBENGINE_AVAILABLE:
+                self.web_view = TestWebView()
                 self.web_view.setMinimumHeight(350)
                 self.web_view.urlChanged.connect(self._on_browser_url_changed)
+                self.web_view.loadFinished.connect(self._on_browser_load_finished)
                 main_layout.addWidget(self.web_view)
             # ------------------------------------------------------
 
@@ -788,11 +820,19 @@ class MainWindow(QMainWindow):
             return
 
         self.test_url_input.setText(url_text)
-        if self.test_running:
-            self.record_page_entry(url_text)
-            # URL 변경마다 스크린샷 캡처 후 MinIO 비동기 업로드
-            if self.page_logs:
-                self._capture_and_upload_screenshot(self.page_logs[-1])
+
+    def _on_browser_load_finished(self, success: bool) -> None:
+        """페이지 로딩이 끝난 뒤 로그와 스크린샷을 기록해 히트맵 배경/시간 범위를 맞춘다."""
+        if not success or not self.test_running:
+            return
+
+        url_text = self.web_view.url().toString() if hasattr(self, "web_view") else self.test_url_input.text().strip()
+        if not url_text or url_text == "about:blank":
+            return
+
+        self.record_page_entry(url_text)
+        if self.page_logs:
+            QTimer.singleShot(500, lambda entry=self.page_logs[-1]: self._capture_and_upload_screenshot(entry))
                 
     def _stop_test(self):
         """테스트 종료 및 녹화 중지"""
@@ -858,6 +898,7 @@ class MainWindow(QMainWindow):
             self.is_uploading = True
             self.p_bar.setValue(0)
             self.upload_status_label.setText("데이터를 정리하여 서버로 전송 중입니다...")
+            self._wait_for_screenshot_uploads()
 
             # 메타데이터 구성
             metadata = {
@@ -1054,7 +1095,7 @@ class MainWindow(QMainWindow):
 
     def _capture_and_upload_screenshot(self, log_entry: dict) -> None:
             """
-            현재 화면 전체를 캡처하여 디스크 저장 없이 메모리상에서 즉시 서버로 업로드하는 시퀀스를 시작합니다.
+            테스트 viewport 기준 스크린샷을 캡처하여 서버로 업로드하는 시퀀스를 시작합니다.
             
             :param log_entry: 화면 이동 로그 기록을 담고 있는 딕셔너리 객체 (업로드 완료 후 경로 업데이트용)
             """
@@ -1064,8 +1105,20 @@ class MainWindow(QMainWindow):
                 print("⚠️ 활성화된 스크린을 찾을 수 없어 캡처를 중단합니다.")
                 return
 
-            # 2. 메인 스크린의 전체 화면을 QPixmap 형태로 캡처(Grab)
-            pixmap = screen.grabWindow(0)
+            # 2. 히트맵 좌표계와 맞도록 전체 화면이 아니라 사용자가 지정한 테스트 viewport를 캡처한다.
+            region = getattr(self, "capture_region", None)
+            if region:
+                pixmap = screen.grabWindow(
+                    0,
+                    int(region["left"]),
+                    int(region["top"]),
+                    int(region["width"]),
+                    int(region["height"]),
+                )
+            elif hasattr(self, "web_view") and self.web_view is not None:
+                pixmap = self.web_view.grab()
+            else:
+                pixmap = screen.grabWindow(0)
             
             # 3. 디스크에 임시 PNG 파일을 쓰지 않기 위해 PySide6의 메모리 버퍼 시스템을 활용
             byte_array = QByteArray()                # 바이너리 데이터를 담을 바이트 배열 생성
@@ -1074,11 +1127,12 @@ class MainWindow(QMainWindow):
             pixmap.save(buffer, "PNG")               # 캡처한 이미지를 PNG 포맷의 바이너리로 버퍼에 기록
             image_bytes = byte_array.data()          # 최종적으로 Python에서 사용할 수 있는 bytes 형태로 변환
 
-            # 4. 고유한 작업을 식별하기 위해 현재까지 기록된 페이지 로그의 길이를 임시 ID로 설정
-            log_id = str(len(self.page_logs))
+            # 4. 페이지별 screenshot object_key가 덮어쓰기 되지 않도록 page_no를 작업 식별자로 사용
+            page_no = int(log_entry.get("page_no", len(self.page_logs)))
+            log_id = str(page_no)
 
             # 5. UI 메인 스레드가 멈추지 않도록 비동기 스레드인 ScreenshotUploadWorker를 생성
-            worker = ScreenshotUploadWorker(self.api, image_bytes, log_id)
+            worker = ScreenshotUploadWorker(self.api, image_bytes, log_id, page_no)
             
             # 6. 파이썬의 가비지 컬렉터(GC)에 의해 워커 객체가 도중에 소멸되는 것을 방지하기 위해 리스트에 참조를 유지
             if not hasattr(self, 'screenshot_workers'):
@@ -1118,6 +1172,14 @@ class MainWindow(QMainWindow):
         # 사용이 완료된 워커 객체는 메모리 누수 방지를 위해 관리 리스트에서 제거
         if hasattr(self, 'screenshot_workers') and worker in self.screenshot_workers:
             self.screenshot_workers.remove(worker)
+
+    def _wait_for_screenshot_uploads(self) -> None:
+        """메타데이터 전송 전 페이지별 스크린샷 업로드가 끝날 때까지 짧게 대기한다."""
+        workers = list(getattr(self, "screenshot_workers", []))
+        for worker in workers:
+            if worker.isRunning():
+                worker.wait(3000)
+                QApplication.processEvents()
             
     # ──────────────────────────────────────────────
     # 화면 4: 보고서
@@ -1137,26 +1199,45 @@ class MainWindow(QMainWindow):
         return self._app_frame(body, "done")
 
     def _handle_report_download(self) -> None:
-        result = getattr(self, "report_result", None) or self.api.get_report_status()
-        if isinstance(result, dict) and result.get("status") == "accepted":
+        try:
             result = self.api.get_report_status()
-        pdf_bytes = result.get("pdf_bytes") if isinstance(result, dict) else None
-        if pdf_bytes:
-            reports_dir = os.path.abspath("reports")
-            os.makedirs(reports_dir, exist_ok=True)
-            session_part = self.state.session_id or "latest"
-            pdf_path = os.path.join(reports_dir, f"report_{session_part}.pdf")
-            with open(pdf_path, "wb") as file:
-                file.write(pdf_bytes)
-            QMessageBox.information(self, "보고서 저장 완료", f"PDF 저장 경로:\n{pdf_path}")
-            return
+            pdf_bytes = result.get("pdf_bytes") if isinstance(result, dict) else None
 
-        pdf_url = result.get("pdf_url") or result.get("pdf_presigned_url") or result.get("download_url")
-        if pdf_url:
-            QMessageBox.information(self, "보고서 준비 완료", f"보고서 URL:\n{pdf_url}")
-            return
+            if not pdf_bytes and isinstance(result, dict):
+                pdf_url = (
+                    result.get("pdf_url")
+                    or result.get("pdf_presigned_url")
+                    or result.get("download_url")
+                    or result.get("report_url")
+                )
+                if pdf_url:
+                    pdf_bytes = self.api.download_file_from_url(pdf_url)
 
-        QMessageBox.information(self, "보고서 상태", f"현재 상태: {result.get('status', 'unknown')}")
+            if pdf_bytes:
+                pdf_path = self._save_report_pdf(pdf_bytes)
+                QMessageBox.information(self, "보고서 저장 완료", f"PDF 저장 경로:\n{pdf_path}")
+                return
+
+            status = result.get("status", "unknown") if isinstance(result, dict) else "unknown"
+            if status in {"generating", "accepted", "processing"}:
+                QMessageBox.information(self, "보고서 생성 중", "PDF가 아직 생성 중입니다. 잠시 후 다시 시도해 주세요.")
+            else:
+                QMessageBox.warning(
+                    self,
+                    "보고서 다운로드 실패",
+                    f"서버 응답에서 PDF 파일 또는 다운로드 URL을 찾지 못했습니다.\n현재 상태: {status}",
+                )
+        except Exception as exc:
+            QMessageBox.critical(self, "보고서 다운로드 오류", f"PDF 다운로드 중 오류가 발생했습니다:\n{exc}")
+
+    def _save_report_pdf(self, pdf_bytes: bytes) -> str:
+        reports_dir = os.path.abspath("reports")
+        os.makedirs(reports_dir, exist_ok=True)
+        session_part = self.state.session_id or "latest"
+        pdf_path = os.path.join(reports_dir, f"report_{session_part}.pdf")
+        with open(pdf_path, "wb") as file:
+            file.write(pdf_bytes)
+        return pdf_path
 
     def closeEvent(self, event) -> None:
             """
