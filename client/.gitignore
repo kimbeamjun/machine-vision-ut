@@ -1,0 +1,28 @@
+# === 가상환경 및 라이브러리 (용량 및 에러 주범) ===
+venv/
+.venv/
+ut_client/venv/
+
+# === Python & OS 관련 ===
+__pycache__/          # 파이썬 실행 시 자동 생성되는 컴파일 파일
+*.py[cod]             
+*$py.class
+.env                  # API 키 등 보안 정보가 포함된 환경변수 파일
+.vscode/              # 개인 설정 (팀원마다 다를 수 있음)
+.DS_Store             # macOS 전용 메타데이터
+Thumbs.db             # Windows 전용 썸네일 데이터
+
+# === 프로젝트 생성 데이터 ===
+**/*.mp4
+**/*.avi
+screenshots/          # 테스트 중 캡처된 스크린샷 폴더
+logs/                 # 실행 로그 파일
+
+# === 외부 라이브러리 및 DB 관련 ===
+*.db                  # SQLite 등 로컬 DB 파일
+*.log
+
+# 특정 폴더 전체 제외
+recordings/
+screenshots/
+logs/

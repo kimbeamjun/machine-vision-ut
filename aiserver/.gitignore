@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 환경설정 (보안)
+.env
+*.env
+
+# 모델 가중치 (용량 큼)
+
+# 학습 데이터 (용량 큼)
+dataset/
+data/
+
+# 로그 / 임시파일
+logs/
+*.log
+*.pid
+/tmp/
+
+# 테스트 영상
+*.mp4
+*.avi
+*.mov
+face_test.mp4
+테스트영상.mp4
+
+# MediaPipe 모델
+/tmp/face_landmarker.task
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# Redis
+*.rdb
+
+# VS Code
+.vscode/
