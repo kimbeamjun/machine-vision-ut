@@ -223,8 +223,25 @@ async def get_report(id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=400, detail="분석이 요청되지 않았습니다.")
         
     if report.status == "generating":
-        return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={"report_status": "generating"})
+        return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={"status": "generating", "report_status": "generating"})
     elif report.status == "failed":
-        return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"report_status": "failed", "error": "AI 분석 실패"})
+        return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"status": "failed", "report_status": "failed", "error": "AI 분석 실패"})
     elif report.status == "done":
-        return {"report_status": "done", "pdf_path": report.pdf_path, "llm_text": report.llm_text}
+        pdf_url = None
+        if report.pdf_path:
+            try:
+                pdf_url = minio_client.presigned_get_object(
+                    BUCKET_NAME,
+                    report.pdf_path,
+                    expires=timedelta(hours=24)
+                )
+            except Exception as e:
+                print(f"[ERROR] Failed to generate presigned URL for PDF: {e}")
+                
+        return {
+            "status": "done",
+            "report_status": "done",
+            "pdf_url": pdf_url,
+            "pdf_path": report.pdf_path, 
+            "llm_text": report.llm_text
+        }
